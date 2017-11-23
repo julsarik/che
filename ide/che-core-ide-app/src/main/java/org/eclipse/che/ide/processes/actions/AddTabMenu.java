@@ -89,10 +89,6 @@ public class AddTabMenu extends ContextMenu {
         actionGroup.add(newTerminalMenuAction);
       }
 
-      if (machine.getServerByName(SERVER_SSH_REFERENCE).isPresent()) {
-        AddSSHMenuAction addSSHMenuAction = new AddSSHMenuAction(machine.getName());
-        actionGroup.add(addSSHMenuAction);
-      }
 
       ShowServersAction showServersAction = new ShowServersAction(machine.getName());
       actionGroup.add(showServersAction);
@@ -121,21 +117,6 @@ public class AddTabMenu extends ContextMenu {
     }
   }
 
-  /** Action to add new SSH tab. */
-  public class AddSSHMenuAction extends BaseAction {
-
-    private String machineName;
-
-    public AddSSHMenuAction(String machineName) {
-      super("SSH", "SSH", FontAwesome.RETWEET);
-      this.machineName = machineName;
-    }
-
-    @Override
-    public void actionPerformed(ActionEvent e) {
-      processesPanelPresenter.onPreviewSsh(machineName);
-    }
-  }
 
   /** Action to display bound servers. */
   public class ShowServersAction extends BaseAction {
