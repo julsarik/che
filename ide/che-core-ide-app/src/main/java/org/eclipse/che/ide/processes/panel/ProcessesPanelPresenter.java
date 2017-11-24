@@ -850,10 +850,6 @@ public class ProcessesPanelPresenter extends BasePresenter
 
     machineNode.setTerminalServerRunning(isServerRunning(machineName, SERVER_TERMINAL_REFERENCE));
 
-    // rely on "wsagent" server's status since "ssh" server's status is always UNKNOWN
-    String wsAgentServerRef = wsAgentServerUtil.getWsAgentHttpServerReference();
-    machineNode.setSshServerRunning(isServerRunning(machineName, wsAgentServerRef));
-
     for (ProcessTreeNode child : children) {
       child.setParent(machineNode);
     }
