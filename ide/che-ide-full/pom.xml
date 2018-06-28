@@ -16,7 +16,7 @@
     <parent>
         <artifactId>che-parent</artifactId>
         <groupId>org.eclipse.che</groupId>
-        <version>6.3.0-SNAPSHOT</version>
+        <version>6.8.0-SNAPSHOT</version>
         <relativePath>../../pom.xml</relativePath>
     </parent>
     <groupId>org.eclipse.che.core</groupId>
@@ -32,7 +32,7 @@
         </dependency>
         <dependency>
             <groupId>org.eclipse.che.plugin</groupId>
-            <artifactId>che-plugin-activity-ide</artifactId>
+            <artifactId>che-plugin-ceylon-lang-ide</artifactId>
             <type>gwt-lib</type>
         </dependency>
         <dependency>
@@ -78,6 +78,11 @@
         <dependency>
             <groupId>org.eclipse.che.plugin</groupId>
             <artifactId>che-plugin-github-pullrequest</artifactId>
+            <type>gwt-lib</type>
+        </dependency>
+        <dependency>
+            <groupId>org.eclipse.che.plugin</groupId>
+            <artifactId>che-plugin-golang-lang-ide</artifactId>
             <type>gwt-lib</type>
         </dependency>
         <dependency>

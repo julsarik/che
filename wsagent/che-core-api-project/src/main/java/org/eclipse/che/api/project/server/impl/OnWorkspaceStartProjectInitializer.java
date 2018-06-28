@@ -26,13 +26,14 @@ import org.eclipse.che.api.core.ServerException;
 import org.eclipse.che.api.core.model.workspace.config.ProjectConfig;
 import org.eclipse.che.api.fs.server.FsManager;
 import org.eclipse.che.api.project.server.handlers.ProjectInitHandler;
+import org.eclipse.che.api.project.shared.RegisteredProject;
 import org.eclipse.che.api.search.server.excludes.HiddenItemPathMatcher;
 
 @Singleton
 public class OnWorkspaceStartProjectInitializer {
 
   private final FsManager fsManager;
-  private final ProjectSynchronizer projectSynchronizer;
+  private final WorkspaceProjectSynchronizer projectSynchronizer;
   private final ProjectConfigRegistry projectConfigRegistry;
   private final ProjectHandlerRegistry projectHandlerRegistry;
   private final HiddenItemPathMatcher hiddenItemPathMatcher;
@@ -40,7 +41,7 @@ public class OnWorkspaceStartProjectInitializer {
   @Inject
   public OnWorkspaceStartProjectInitializer(
       FsManager fsManager,
-      ProjectSynchronizer projectSynchronizer,
+      WorkspaceProjectSynchronizer projectSynchronizer,
       ProjectConfigRegistry projectConfigRegistry,
       ProjectHandlerRegistry projectHandlerRegistry,
       HiddenItemPathMatcher hiddenItemPathMatcher) {
@@ -59,8 +60,9 @@ public class OnWorkspaceStartProjectInitializer {
     firePostInitializationHandlers();
   }
 
-  private void initializeRegisteredProjects() throws ServerException {
-    for (ProjectConfig projectConfig : projectSynchronizer.getAll()) {
+  private void initializeRegisteredProjects()
+      throws ServerException, NotFoundException, ConflictException {
+    for (ProjectConfig projectConfig : projectSynchronizer.getProjects()) {
       projectConfigRegistry.put(projectConfig, false, false);
     }
   }
@@ -77,6 +79,7 @@ public class OnWorkspaceStartProjectInitializer {
       throws ServerException, ConflictException, NotFoundException, ForbiddenException {
 
     for (RegisteredProject project : projectConfigRegistry.getAll()) {
+
       if (project.getBaseFolder() == null) {
         continue;
       }

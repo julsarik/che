@@ -26,7 +26,7 @@ import org.eclipse.che.commons.lang.NameGenerator;
 import org.eclipse.che.commons.lang.concurrent.LoggingUncaughtExceptionHandler;
 import org.eclipse.che.selenium.core.client.TestWorkspaceServiceClient;
 import org.eclipse.che.selenium.core.client.TestWorkspaceServiceClientFactory;
-import org.eclipse.che.selenium.core.user.TestUser;
+import org.eclipse.che.selenium.core.user.DefaultTestUser;
 import org.eclipse.che.selenium.core.utils.WorkspaceDtoDeserializer;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -42,7 +42,7 @@ public class TestWorkspaceProviderImpl implements TestWorkspaceProvider {
   private static final String AUTO = "auto";
 
   private final int poolSize;
-  private final TestUser defaultUser;
+  private final DefaultTestUser defaultUser;
   private final int defaultMemoryGb;
   private final TestWorkspaceServiceClient testWorkspaceServiceClient;
   private final TestWorkspaceServiceClientFactory testWorkspaceServiceClientFactory;
@@ -56,7 +56,7 @@ public class TestWorkspaceProviderImpl implements TestWorkspaceProvider {
       @Named("che.workspace_pool_size") String poolSize,
       @Named("che.threads") int threads,
       @Named("workspace.default_memory_gb") int defaultMemoryGb,
-      TestUser defaultUser,
+      DefaultTestUser defaultUser,
       WorkspaceDtoDeserializer workspaceDtoDeserializer,
       TestWorkspaceServiceClient testWorkspaceServiceClient,
       TestWorkspaceServiceClientFactory testWorkspaceServiceClientFactory) {
@@ -78,9 +78,10 @@ public class TestWorkspaceProviderImpl implements TestWorkspaceProvider {
   }
 
   @Override
-  public TestWorkspace createWorkspace(TestUser owner, int memoryGB, String template)
+  public TestWorkspace createWorkspace(
+      DefaultTestUser owner, int memoryGB, String template, boolean startAfterCreation)
       throws Exception {
-    if (poolSize > 0 && hasDefaultValues(owner, memoryGB, template)) {
+    if (poolSize > 0 && hasDefaultValues(owner, memoryGB, template, startAfterCreation)) {
       return doGetWorkspaceFromPool();
     }
 
@@ -88,15 +89,17 @@ public class TestWorkspaceProviderImpl implements TestWorkspaceProvider {
         generateName(),
         owner,
         memoryGB,
+        startAfterCreation,
         workspaceDtoDeserializer.deserializeWorkspaceTemplate(template),
-        testWorkspaceServiceClientFactory.create(
-            owner.getEmail(), owner.getPassword(), owner.getOfflineToken()));
+        testWorkspaceServiceClientFactory.create(owner));
   }
 
-  private boolean hasDefaultValues(TestUser testUser, int memoryGB, String template) {
+  private boolean hasDefaultValues(
+      DefaultTestUser testUser, int memoryGB, String template, boolean startAfterCreation) {
     return memoryGB == defaultMemoryGb
         && WorkspaceTemplate.DEFAULT.equals(template)
-        && testUser.getEmail().equals(defaultUser.getEmail());
+        && testUser.getEmail().equals(defaultUser.getEmail())
+        && startAfterCreation;
   }
 
   private TestWorkspace doGetWorkspaceFromPool() throws Exception {
@@ -190,6 +193,7 @@ public class TestWorkspaceProviderImpl implements TestWorkspaceProvider {
                       name,
                       defaultUser,
                       defaultMemoryGb,
+                      true,
                       workspaceDtoDeserializer.deserializeWorkspaceTemplate(
                           WorkspaceTemplate.DEFAULT),
                       testWorkspaceServiceClient);

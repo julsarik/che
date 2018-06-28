@@ -19,8 +19,10 @@ import org.eclipse.che.selenium.core.TestGroup;
 import org.eclipse.che.selenium.core.client.TestGitHubServiceClient;
 import org.eclipse.che.selenium.core.client.TestUserPreferencesServiceClient;
 import org.eclipse.che.selenium.core.constant.TestMenuCommandsConstants;
+import org.eclipse.che.selenium.core.webdriver.SeleniumWebDriverHelper;
 import org.eclipse.che.selenium.core.workspace.TestWorkspace;
 import org.eclipse.che.selenium.pageobject.AskDialog;
+import org.eclipse.che.selenium.pageobject.CheTerminal;
 import org.eclipse.che.selenium.pageobject.Events;
 import org.eclipse.che.selenium.pageobject.GitHub;
 import org.eclipse.che.selenium.pageobject.Ide;
@@ -31,7 +33,6 @@ import org.eclipse.che.selenium.pageobject.Preferences;
 import org.eclipse.che.selenium.pageobject.ProjectExplorer;
 import org.eclipse.che.selenium.pageobject.dashboard.Dashboard;
 import org.eclipse.che.selenium.pageobject.dashboard.account.KeycloakFederatedIdentitiesPage;
-import org.eclipse.che.selenium.pageobject.machineperspective.MachineTerminal;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.testng.annotations.AfterClass;
@@ -48,11 +49,11 @@ public class AuthorizeOnGithubFromPreferencesTest {
   @Inject private TestWorkspace ws;
   @Inject private Ide ide;
 
-  @Inject(optional = true)
+  @Inject
   @Named("github.username")
   private String gitHubUsername;
 
-  @Inject(optional = true)
+  @Inject
   @Named("github.password")
   private String gitHubPassword;
 
@@ -61,11 +62,12 @@ public class AuthorizeOnGithubFromPreferencesTest {
   private boolean isMultiuser;
 
   @Inject private ProjectExplorer projectExplorer;
-  @Inject private MachineTerminal terminal;
+  @Inject private CheTerminal terminal;
   @Inject private Menu menu;
   @Inject private ImportProjectFromLocation importProject;
   @Inject private Preferences preferences;
   @Inject private SeleniumWebDriver seleniumWebDriver;
+  @Inject private SeleniumWebDriverHelper seleniumWebDriverHelper;
   @Inject private AskDialog askDialog;
   @Inject private GitHub gitHub;
   @Inject private TestGitHubServiceClient gitHubClientService;
@@ -105,7 +107,7 @@ public class AuthorizeOnGithubFromPreferencesTest {
       preferences.deleteSshKeyByHost(GITHUB_COM);
     }
 
-    preferences.clickOnCloseBtn();
+    preferences.closeForm();
   }
 
   @Test
@@ -121,7 +123,7 @@ public class AuthorizeOnGithubFromPreferencesTest {
     askDialog.waitFormToOpen(25);
     askDialog.clickOkBtn();
     askDialog.waitFormToClose();
-    seleniumWebDriver.switchToNoneCurrentWindow(ideWin);
+    seleniumWebDriverHelper.switchToNextWindow(ideWin);
 
     gitHub.waitAuthorizationPageOpened();
     gitHub.typeLogin(gitHubUsername);
@@ -144,7 +146,12 @@ public class AuthorizeOnGithubFromPreferencesTest {
     // check GitHub identity is present in Keycloak account management page
     if (isMultiuser) {
       keycloakFederatedIdentitiesPage.open();
-      assertEquals(keycloakFederatedIdentitiesPage.getGitHubIdentityFieldValue(), gitHubUsername);
+
+      // set to lower case because it's a normal behaviour (issue:
+      // https://github.com/eclipse/che/issues/10138)
+      assertEquals(
+          keycloakFederatedIdentitiesPage.getGitHubIdentityFieldValue(),
+          gitHubUsername.toLowerCase());
     }
   }
 

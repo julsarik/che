@@ -20,10 +20,9 @@ import javax.annotation.PreDestroy;
 import org.eclipse.che.api.core.model.workspace.Workspace;
 import org.eclipse.che.api.workspace.shared.dto.WorkspaceConfigDto;
 import org.eclipse.che.selenium.core.client.TestWorkspaceServiceClient;
-import org.eclipse.che.selenium.core.user.TestUser;
+import org.eclipse.che.selenium.core.user.DefaultTestUser;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.testng.Assert;
 
 /** @author Anatolii Bazko */
 public class TestWorkspaceImpl implements TestWorkspace {
@@ -31,14 +30,15 @@ public class TestWorkspaceImpl implements TestWorkspace {
 
   private final String name;
   private final CompletableFuture<Void> future;
-  private final TestUser owner;
+  private final DefaultTestUser owner;
   private final AtomicReference<String> id;
   private final TestWorkspaceServiceClient workspaceServiceClient;
 
   public TestWorkspaceImpl(
       String name,
-      TestUser owner,
+      DefaultTestUser owner,
       int memoryInGB,
+      boolean startAfterCreation,
       WorkspaceConfigDto template,
       TestWorkspaceServiceClient testWorkspaceServiceClient) {
     if (template == null) {
@@ -57,12 +57,15 @@ public class TestWorkspaceImpl implements TestWorkspace {
                 final Workspace ws =
                     workspaceServiceClient.createWorkspace(name, memoryInGB, GB, template);
                 long start = System.currentTimeMillis();
-                workspaceServiceClient.start(id.updateAndGet((s) -> ws.getId()), name, owner);
-                LOG.info(
-                    "Workspace name='{}' id='{}' started in {} sec.",
-                    name,
-                    ws.getId(),
-                    (System.currentTimeMillis() - start) / 1000);
+
+                if (startAfterCreation) {
+                  workspaceServiceClient.start(id.updateAndGet((s) -> ws.getId()), name, owner);
+                  LOG.info(
+                      "Workspace name='{}' id='{}' started in {} sec.",
+                      name,
+                      ws.getId(),
+                      (System.currentTimeMillis() - start) / 1000);
+                }
               } catch (Exception e) {
                 String errorMessage = format("Workspace name='%s' start failed.", name);
                 LOG.error(errorMessage, e);
@@ -73,11 +76,7 @@ public class TestWorkspaceImpl implements TestWorkspace {
                   LOG.error("Failed to remove workspace name='{}' when start is failed.", name);
                 }
 
-                if (e instanceof IllegalStateException) {
-                  Assert.fail("Known issue https://github.com/eclipse/che/issues/8856", e);
-                } else {
-                  throw new IllegalStateException(errorMessage, e);
-                }
+                throw new IllegalStateException(errorMessage, e);
               }
             });
   }
@@ -98,7 +97,7 @@ public class TestWorkspaceImpl implements TestWorkspace {
   }
 
   @Override
-  public TestUser getOwner() {
+  public DefaultTestUser getOwner() {
     return owner;
   }
 

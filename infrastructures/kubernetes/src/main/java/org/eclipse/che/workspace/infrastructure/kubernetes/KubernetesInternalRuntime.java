@@ -12,12 +12,15 @@ package org.eclipse.che.workspace.infrastructure.kubernetes;
 
 import static java.lang.String.format;
 import static java.util.Collections.emptyMap;
+import static org.eclipse.che.workspace.infrastructure.kubernetes.Constants.POD_STATUS_PHASE_FAILED;
 
 import com.google.common.collect.ImmutableMap;
+import com.google.common.collect.ImmutableSet;
 import com.google.inject.assistedinject.Assisted;
 import io.fabric8.kubernetes.api.model.Container;
 import io.fabric8.kubernetes.api.model.ObjectMeta;
 import io.fabric8.kubernetes.api.model.Pod;
+import io.fabric8.kubernetes.api.model.Secret;
 import io.fabric8.kubernetes.api.model.Service;
 import io.fabric8.kubernetes.api.model.extensions.Ingress;
 import io.fabric8.kubernetes.client.Watcher.Action;
@@ -26,9 +29,9 @@ import java.util.Collection;
 import java.util.List;
 import java.util.Map;
 import java.util.Map.Entry;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Executor;
@@ -40,9 +43,9 @@ import java.util.function.Function;
 import javax.inject.Inject;
 import javax.inject.Named;
 import org.eclipse.che.api.core.model.workspace.Warning;
+import org.eclipse.che.api.core.model.workspace.WorkspaceStatus;
 import org.eclipse.che.api.core.model.workspace.runtime.MachineStatus;
 import org.eclipse.che.api.core.model.workspace.runtime.RuntimeIdentity;
-import org.eclipse.che.api.core.model.workspace.runtime.Server;
 import org.eclipse.che.api.core.model.workspace.runtime.ServerStatus;
 import org.eclipse.che.api.workspace.server.URLRewriter.NoOpURLRewriter;
 import org.eclipse.che.api.workspace.server.hc.ServersChecker;
@@ -50,18 +53,25 @@ import org.eclipse.che.api.workspace.server.hc.ServersCheckerFactory;
 import org.eclipse.che.api.workspace.server.hc.probe.ProbeResult;
 import org.eclipse.che.api.workspace.server.hc.probe.ProbeResult.ProbeStatus;
 import org.eclipse.che.api.workspace.server.hc.probe.ProbeScheduler;
+import org.eclipse.che.api.workspace.server.hc.probe.WorkspaceProbes;
 import org.eclipse.che.api.workspace.server.hc.probe.WorkspaceProbesFactory;
 import org.eclipse.che.api.workspace.server.spi.InfrastructureException;
 import org.eclipse.che.api.workspace.server.spi.InternalInfrastructureException;
 import org.eclipse.che.api.workspace.server.spi.InternalRuntime;
+import org.eclipse.che.api.workspace.server.spi.RuntimeStartInterruptedException;
+import org.eclipse.che.api.workspace.server.spi.StateException;
 import org.eclipse.che.api.workspace.server.spi.environment.InternalMachineConfig;
 import org.eclipse.che.commons.env.EnvironmentContext;
 import org.eclipse.che.workspace.infrastructure.kubernetes.bootstrapper.KubernetesBootstrapperFactory;
+import org.eclipse.che.workspace.infrastructure.kubernetes.cache.KubernetesMachineCache;
+import org.eclipse.che.workspace.infrastructure.kubernetes.cache.KubernetesRuntimeStateCache;
 import org.eclipse.che.workspace.infrastructure.kubernetes.environment.KubernetesEnvironment;
+import org.eclipse.che.workspace.infrastructure.kubernetes.model.KubernetesMachineImpl;
+import org.eclipse.che.workspace.infrastructure.kubernetes.model.KubernetesRuntimeState;
 import org.eclipse.che.workspace.infrastructure.kubernetes.namespace.KubernetesNamespace;
-import org.eclipse.che.workspace.infrastructure.kubernetes.namespace.event.ContainerEvent;
-import org.eclipse.che.workspace.infrastructure.kubernetes.namespace.event.ContainerEventHandler;
 import org.eclipse.che.workspace.infrastructure.kubernetes.namespace.event.PodActionHandler;
+import org.eclipse.che.workspace.infrastructure.kubernetes.namespace.event.PodEvent;
+import org.eclipse.che.workspace.infrastructure.kubernetes.namespace.event.PodEventHandler;
 import org.eclipse.che.workspace.infrastructure.kubernetes.namespace.pvc.WorkspaceVolumesStrategy;
 import org.eclipse.che.workspace.infrastructure.kubernetes.server.KubernetesServerResolver;
 import org.eclipse.che.workspace.infrastructure.kubernetes.util.KubernetesSharedPool;
@@ -79,10 +89,9 @@ public class KubernetesInternalRuntime<
 
   private static final Logger LOG = LoggerFactory.getLogger(KubernetesInternalRuntime.class);
 
-  private static final String POD_FAILED_STATUS = "Failed";
-
   private final int workspaceStartTimeout;
   private final int ingressStartTimeout;
+  private final Set<String> unrecoverableEvents;
   private final ServersCheckerFactory serverCheckerFactory;
   private final KubernetesBootstrapperFactory bootstrapperFactory;
   private final ProbeScheduler probeScheduler;
@@ -91,13 +100,15 @@ public class KubernetesInternalRuntime<
   private final WorkspaceVolumesStrategy volumesStrategy;
   private final RuntimeEventsPublisher eventPublisher;
   private final Executor executor;
-
-  protected final Map<String, KubernetesMachine> machines;
+  private final KubernetesRuntimeStateCache runtimeStates;
+  private final KubernetesMachineCache machines;
+  private final StartSynchronizer startSynchronizer;
 
   @Inject
   public KubernetesInternalRuntime(
       @Named("che.infra.kubernetes.workspace_start_timeout_min") int workspaceStartTimeout,
       @Named("che.infra.kubernetes.ingress_start_timeout_min") int ingressStartTimeout,
+      @Named("che.infra.kubernetes.workspace_unrecoverable_events") String[] unrecoverableEvents,
       NoOpURLRewriter urlRewriter,
       KubernetesBootstrapperFactory bootstrapperFactory,
       ServersCheckerFactory serverCheckerFactory,
@@ -106,21 +117,27 @@ public class KubernetesInternalRuntime<
       WorkspaceProbesFactory probesFactory,
       RuntimeEventsPublisher eventPublisher,
       KubernetesSharedPool sharedPool,
+      KubernetesRuntimeStateCache runtimeStates,
+      KubernetesMachineCache machines,
+      StartSynchronizerFactory startSynchronizerFactory,
       @Assisted T context,
       @Assisted KubernetesNamespace namespace,
       @Assisted List<Warning> warnings) {
-    super(context, urlRewriter, warnings, false);
+    super(context, urlRewriter, warnings);
     this.bootstrapperFactory = bootstrapperFactory;
     this.serverCheckerFactory = serverCheckerFactory;
     this.volumesStrategy = volumesStrategy;
     this.workspaceStartTimeout = workspaceStartTimeout;
     this.ingressStartTimeout = ingressStartTimeout;
+    this.unrecoverableEvents = ImmutableSet.copyOf(unrecoverableEvents);
     this.probeScheduler = probeScheduler;
     this.probesFactory = probesFactory;
     this.namespace = namespace;
     this.eventPublisher = eventPublisher;
     this.executor = sharedPool.getExecutor();
-    this.machines = new ConcurrentHashMap<>();
+    this.runtimeStates = runtimeStates;
+    this.machines = machines;
+    this.startSynchronizer = startSynchronizerFactory.create(context.getIdentity());
   }
 
   @Override
@@ -128,52 +145,75 @@ public class KubernetesInternalRuntime<
     KubernetesRuntimeContext<? extends KubernetesEnvironment> context = getContext();
     String workspaceId = context.getIdentity().getWorkspaceId();
     try {
-      final KubernetesEnvironment k8sEnv = context.getEnvironment();
-      volumesStrategy.prepare(k8sEnv, workspaceId);
+      startSynchronizer.setStartThread();
+      startSynchronizer.start();
+
+      volumesStrategy.prepare(context.getEnvironment(), workspaceId);
+
+      startSynchronizer.checkFailure();
+
       startMachines();
 
-      final CompletableFuture<Void> failure = new CompletableFuture<>();
+      startSynchronizer.checkFailure();
+
       final List<CompletableFuture<Void>> machinesFutures = new ArrayList<>();
       // futures that must be cancelled explicitly
       final List<CompletableFuture<?>> toCancelFutures = new CopyOnWriteArrayList<>();
       final EnvironmentContext currentContext = EnvironmentContext.getCurrent();
+      CompletableFuture<Void> startFailure = startSynchronizer.getStartFailure();
 
-      for (KubernetesMachine machine : machines.values()) {
-        final CompletableFuture<Void> machineRunningFuture = machine.waitRunningAsync();
-        toCancelFutures.add(machineRunningFuture);
+      for (KubernetesMachineImpl machine : machines.getMachines(context.getIdentity()).values()) {
+        String machineName = machine.getName();
         final CompletableFuture<Void> machineBootChain =
-            machineRunningFuture
+            waitRunningAsync(toCancelFutures, machine)
                 // since machine running future will be completed from the thread that is not from
                 // kubernetes pool it's needed to explicitly put the executor to not to delay
                 // processing in the external pool.
-                .thenComposeAsync(checkFailure(failure), executor)
-                .thenRun(publishRunningStatus(machine))
-                .thenCompose(checkFailure(failure))
+                .thenComposeAsync(checkFailure(startFailure), executor)
+                .thenRun(publishRunningStatus(machineName))
+                .thenCompose(checkFailure(startFailure))
                 .thenCompose(setContext(currentContext, bootstrap(toCancelFutures, machine)))
                 // see comments above why executor is explicitly put into arguments
-                .thenComposeAsync(checkFailure(failure), executor)
+                .thenComposeAsync(checkFailure(startFailure), executor)
                 .thenCompose(setContext(currentContext, checkServers(toCancelFutures, machine)))
-                .exceptionally(publishFailedStatus(failure, machine));
+                .exceptionally(publishFailedStatus(startFailure, machineName));
         machinesFutures.add(machineBootChain);
       }
 
-      waitMachines(machinesFutures, toCancelFutures, failure);
-    } catch (InfrastructureException | RuntimeException | InterruptedException e) {
+      waitMachines(machinesFutures, toCancelFutures, startFailure);
+      startSynchronizer.complete();
+    } catch (InfrastructureException | RuntimeException e) {
+      Exception startFailureCause = startSynchronizer.getStartFailureNow();
+      if (startFailureCause == null) {
+        startFailureCause = e;
+      }
+
       LOG.warn(
           "Failed to start Kubernetes runtime of workspace {}. Cause: {}",
           workspaceId,
-          e.getMessage());
-      boolean interrupted = Thread.interrupted() || e instanceof InterruptedException;
+          startFailureCause.getMessage());
+      boolean interrupted =
+          Thread.interrupted() || startFailureCause instanceof RuntimeStartInterruptedException;
       // Cancels workspace servers probes if any
       probeScheduler.cancel(workspaceId);
+      // stop watching before namespace cleaning up
+      namespace.pods().stopWatch();
       try {
         namespace.cleanUp();
-      } catch (InfrastructureException ignored) {
+      } catch (InfrastructureException cleanUppingEx) {
+        LOG.warn(
+            "Failed to clean up namespace after workspace '{}' start failing. Cause: {}",
+            context.getIdentity().getWorkspaceId(),
+            cleanUppingEx.getMessage());
       }
+
+      startSynchronizer.completeExceptionally(startFailureCause);
       if (interrupted) {
-        throw new InfrastructureException("Kubernetes environment start was interrupted");
+        throw new RuntimeStartInterruptedException(getContext().getIdentity());
       }
-      wrapAndRethrow(e);
+      wrapAndRethrow(startFailureCause);
+    } finally {
+      namespace.pods().stopWatch();
     }
   }
 
@@ -197,13 +237,13 @@ public class KubernetesInternalRuntime<
    * @param failure failure callback that is used to prevent subsequent steps when any error occurs
    * @throws InfrastructureException when waiting for machines exceeds the timeout
    * @throws InfrastructureException when any problem occurred while waiting
-   * @throws InterruptedException when the thread is interrupted while waiting machines
+   * @throws RuntimeStartInterruptedException when the thread is interrupted while waiting machines
    */
   private void waitMachines(
       List<CompletableFuture<Void>> machinesFutures,
       List<CompletableFuture<?>> toCancelFutures,
       CompletableFuture<Void> failure)
-      throws InfrastructureException, InterruptedException {
+      throws InfrastructureException {
     try {
       final CompletableFuture<Void> allDone =
           CompletableFuture.allOf(
@@ -211,6 +251,7 @@ public class KubernetesInternalRuntime<
       CompletableFuture.anyOf(allDone, failure).get(workspaceStartTimeout, TimeUnit.MINUTES);
 
       if (failure.isCompletedExceptionally()) {
+        cancelAll(toCancelFutures);
         // rethrow the failure cause
         failure.get();
       }
@@ -224,9 +265,11 @@ public class KubernetesInternalRuntime<
               + getContext().getIdentity().getWorkspaceId()
               + "' reached timeout");
     } catch (InterruptedException ex) {
-      failure.completeExceptionally(ex);
+      RuntimeStartInterruptedException runtimeInterruptedEx =
+          new RuntimeStartInterruptedException(getContext().getIdentity());
+      failure.completeExceptionally(runtimeInterruptedEx);
       cancelAll(toCancelFutures);
-      throw ex;
+      throw runtimeInterruptedEx;
     } catch (ExecutionException ex) {
       failure.completeExceptionally(ex);
       cancelAll(toCancelFutures);
@@ -239,7 +282,7 @@ public class KubernetesInternalRuntime<
    * start of servers probes.
    */
   private Function<Void, CompletionStage<Void>> checkServers(
-      List<CompletableFuture<?>> toCancelFutures, KubernetesMachine machine) {
+      List<CompletableFuture<?>> toCancelFutures, KubernetesMachineImpl machine) {
     return ignored -> {
       // This completable future is used to unity the servers checks and start of probes
       final CompletableFuture<Void> serversAndProbesFuture = new CompletableFuture<>();
@@ -282,7 +325,7 @@ public class KubernetesInternalRuntime<
    * this function will be completed stage.
    */
   private Function<Void, CompletionStage<Void>> bootstrap(
-      List<CompletableFuture<?>> toCancelFutures, KubernetesMachine machine) {
+      List<CompletableFuture<?>> toCancelFutures, KubernetesMachineImpl machine) {
     return ignored -> {
       // think about to return copy of machines in environment
       final InternalMachineConfig machineConfig =
@@ -291,7 +334,12 @@ public class KubernetesInternalRuntime<
       if (!machineConfig.getInstallers().isEmpty()) {
         bootstrapperFuture =
             bootstrapperFactory
-                .create(getContext().getIdentity(), machineConfig.getInstallers(), machine)
+                .create(
+                    getContext().getIdentity(),
+                    machineConfig.getInstallers(),
+                    machine,
+                    namespace,
+                    startSynchronizer)
                 .bootstrapAsync();
         toCancelFutures.add(bootstrapperFuture);
       } else {
@@ -306,21 +354,52 @@ public class KubernetesInternalRuntime<
    * notification about machine start failed will be published.
    */
   private Function<Throwable, Void> publishFailedStatus(
-      CompletableFuture<Void> failure, KubernetesMachine machine) {
+      CompletableFuture<Void> failure, String machineName) {
     return ex -> {
       if (failure.completeExceptionally(ex)) {
-        eventPublisher.sendFailedEvent(
-            machine.getName(), ex.getMessage(), getContext().getIdentity());
+        try {
+          machines.updateMachineStatus(
+              getContext().getIdentity(), machineName, MachineStatus.FAILED);
+        } catch (InfrastructureException e) {
+          LOG.error(
+              "Unable to update status of the machine '{}:{}'. Cause: {}",
+              getContext().getIdentity().getWorkspaceId(),
+              machineName,
+              e.getMessage());
+        }
+        eventPublisher.sendFailedEvent(machineName, ex.getMessage(), getContext().getIdentity());
       }
       return null;
     };
   }
 
+  /**
+   * Returns the future, which ends when machine is considered as running.
+   *
+   * <p>Note that the resulting future must be explicitly cancelled when its completion no longer
+   * important because of finalization allocated resources.
+   */
+  public CompletableFuture<Void> waitRunningAsync(
+      List<CompletableFuture<?>> toCancelFutures, KubernetesMachineImpl machine) {
+    CompletableFuture<Void> waitFuture = namespace.pods().waitRunningAsync(machine.getPodName());
+    toCancelFutures.add(waitFuture);
+    return waitFuture;
+  }
+
   /** Returns instance of {@link Runnable} that propagate machine state. */
-  private Runnable publishRunningStatus(KubernetesMachine machine) {
+  private Runnable publishRunningStatus(String machineName) {
     return () -> {
-      machine.setStatus(MachineStatus.RUNNING);
-      eventPublisher.sendRunningEvent(machine.getName(), getContext().getIdentity());
+      try {
+        machines.updateMachineStatus(
+            getContext().getIdentity(), machineName, MachineStatus.RUNNING);
+      } catch (InfrastructureException e) {
+        LOG.error(
+            "Unable to update status of the machine '{}:{}'. Cause: {}",
+            getContext().getIdentity().getWorkspaceId(),
+            machineName,
+            e.getMessage());
+      }
+      eventPublisher.sendRunningEvent(machineName, getContext().getIdentity());
     };
   }
 
@@ -341,15 +420,35 @@ public class KubernetesInternalRuntime<
   }
 
   @Override
-  public Map<String, ? extends KubernetesMachine> getInternalMachines() {
-    return ImmutableMap.copyOf(machines);
+  public Map<String, ? extends KubernetesMachineImpl> getInternalMachines()
+      throws InfrastructureException {
+    return ImmutableMap.copyOf(machines.getMachines(getContext().getIdentity()));
   }
 
   @Override
   protected void internalStop(Map<String, String> stopOptions) throws InfrastructureException {
-    // Cancels workspace servers probes if any
-    probeScheduler.cancel(getContext().getIdentity().getWorkspaceId());
-    namespace.cleanUp();
+    if (startSynchronizer.interrupt()) {
+      // runtime is STARTING. Need to wait until start will be interrupted properly
+      try {
+        if (!startSynchronizer.awaitInterruption(workspaceStartTimeout, TimeUnit.SECONDS)) {
+          // Runtime is not interrupted yet. It may occur when start was performing by another
+          // Che Server that is crashed so start is hung up in STOPPING phase.
+          // Need to clean up runtime resources
+          RuntimeIdentity identity = getContext().getIdentity();
+          probeScheduler.cancel(identity.getWorkspaceId());
+          namespace.cleanUp();
+        }
+      } catch (InterruptedException e) {
+        throw new InfrastructureException(
+            "Interrupted while waiting for start task cancellation", e);
+      }
+    } else {
+      // runtime is RUNNING. Clean up used resources
+      RuntimeIdentity identity = getContext().getIdentity();
+      // Cancels workspace servers probes if any
+      probeScheduler.cancel(identity.getWorkspaceId());
+      namespace.cleanUp();
+    }
   }
 
   @Override
@@ -364,6 +463,11 @@ public class KubernetesInternalRuntime<
    */
   protected void startMachines() throws InfrastructureException {
     KubernetesEnvironment k8sEnv = getContext().getEnvironment();
+
+    for (Secret secret : k8sEnv.getSecrets().values()) {
+      namespace.secrets().create(secret);
+    }
+
     List<Service> createdServices = new ArrayList<>();
     for (Service service : k8sEnv.getServices().values()) {
       createdServices.add(namespace.services().create(service));
@@ -375,7 +479,11 @@ public class KubernetesInternalRuntime<
 
     // TODO https://github.com/eclipse/che/issues/7653
     // namespace.pods().watch(new AbnormalStopHandler());
-    // namespace.pods().watchContainers(new MachineLogsPublisher());
+    namespace.pods().watchEvents(new MachineLogsPublisher());
+    if (!unrecoverableEvents.isEmpty()) {
+      Map<String, Pod> pods = getContext().getEnvironment().getPods();
+      namespace.pods().watchEvents(new UnrecoverablePodEventHandler(pods));
+    }
 
     final KubernetesServerResolver serverResolver =
         new KubernetesServerResolver(createdServices, readyIngresses);
@@ -398,19 +506,64 @@ public class KubernetesInternalRuntime<
       final ObjectMeta podMetadata = createdPod.getMetadata();
       for (Container container : createdPod.getSpec().getContainers()) {
         String machineName = Names.machineName(toCreate, container);
-        KubernetesMachine machine =
-            new KubernetesMachine(
+
+        String workspaceId = getContext().getIdentity().getWorkspaceId();
+        machines.put(
+            getContext().getIdentity(),
+            new KubernetesMachineImpl(
+                workspaceId,
                 machineName,
                 podMetadata.getName(),
                 container.getName(),
-                serverResolver.resolve(machineName),
-                namespace,
                 MachineStatus.STARTING,
-                machineConfigs.get(machineName).getAttributes());
-        machines.put(machine.getName(), machine);
-        eventPublisher.sendStartingEvent(machine.getName(), getContext().getIdentity());
+                machineConfigs.get(machineName).getAttributes(),
+                serverResolver.resolve(machineName)));
+        eventPublisher.sendStartingEvent(machineName, getContext().getIdentity());
       }
     }
+  }
+
+  @Override
+  public WorkspaceStatus getStatus() throws InfrastructureException {
+    return runtimeStates.getStatus(getContext().getIdentity());
+  }
+
+  @Override
+  protected void markStarting() throws InfrastructureException {
+    if (!runtimeStates.putIfAbsent(
+        new KubernetesRuntimeState(
+            getContext().getIdentity(), namespace.getName(), WorkspaceStatus.STARTING))) {
+      throw new StateException("Runtime is already started");
+    }
+  }
+
+  @Override
+  protected void markRunning() throws InfrastructureException {
+    runtimeStates.updateStatus(getContext().getIdentity(), WorkspaceStatus.RUNNING);
+  }
+
+  @Override
+  protected void markStopping() throws InfrastructureException {
+    RuntimeIdentity runtimeId = getContext().getIdentity();
+
+    // Check if runtime is in STARTING phase to actualize state of startSynchronizer.
+    WorkspaceStatus status = runtimeStates.getStatus(runtimeId);
+    if (status == WorkspaceStatus.STARTING) {
+      startSynchronizer.start();
+    }
+
+    if (!runtimeStates.updateStatus(
+        runtimeId,
+        s -> s == WorkspaceStatus.RUNNING || s == WorkspaceStatus.STARTING,
+        WorkspaceStatus.STOPPING)) {
+      throw new StateException("The environment must be running or starting");
+    }
+  }
+
+  @Override
+  protected void markStopped() throws InfrastructureException {
+    machines.remove(getContext().getIdentity());
+    runtimeStates.remove(getContext().getIdentity());
   }
 
   private List<Ingress> createAndWaitReady(Collection<Ingress> ingresses)
@@ -450,6 +603,44 @@ public class KubernetesInternalRuntime<
     }
   }
 
+  /**
+   * Schedules server checkers.
+   *
+   * <p>Note that if the runtime is {@link WorkspaceStatus#RUNNING} then checkers will be scheduled
+   * immediately. If the runtime is {@link WorkspaceStatus#STARTING} then checkers will be scheduled
+   * when it becomes {@link WorkspaceStatus#RUNNING}. If runtime has any another status then
+   * checkers won't be scheduled at all.
+   *
+   * @throws InfrastructureException when any exception occurred
+   */
+  public void scheduleServersCheckers() throws InfrastructureException {
+    WorkspaceStatus status = getStatus();
+
+    if (status != WorkspaceStatus.RUNNING && status != WorkspaceStatus.STARTING) {
+      return;
+    }
+
+    ServerLivenessHandler consumer = new ServerLivenessHandler();
+    WorkspaceProbes probes =
+        probesFactory.getProbes(getContext().getIdentity(), getInternalMachines());
+
+    if (status == WorkspaceStatus.RUNNING) {
+      probeScheduler.schedule(probes, consumer);
+    } else {
+      // Workspace is starting it is needed to start servers checkers when it becomes RUNNING
+      probeScheduler.schedule(
+          probes,
+          consumer,
+          () -> {
+            try {
+              return getStatus();
+            } catch (InfrastructureException e) {
+              throw new RuntimeException(e.getMessage());
+            }
+          });
+    }
+  }
+
   private class ServerReadinessHandler implements Consumer<String> {
 
     private String machineName;
@@ -460,18 +651,21 @@ public class KubernetesInternalRuntime<
 
     @Override
     public void accept(String serverRef) {
-      final KubernetesMachine machine = machines.get(machineName);
-      if (machine == null) {
-        // Probably machine was removed from the list during server check start due to some reason
-        return;
-      }
+      RuntimeIdentity identity = getContext().getIdentity();
+      try {
+        machines.updateServerStatus(identity, machineName, serverRef, ServerStatus.RUNNING);
 
-      machine.setServerStatus(serverRef, ServerStatus.RUNNING);
-      eventPublisher.sendServerRunningEvent(
-          machineName,
-          serverRef,
-          machine.getServers().get(serverRef).getUrl(),
-          getContext().getIdentity());
+        String url = machines.getServer(identity, machineName, serverRef).getUrl();
+
+        eventPublisher.sendServerRunningEvent(machineName, serverRef, url, identity);
+      } catch (InfrastructureException e) {
+        LOG.error(
+            "Unable to update status of the server '{}:{}:{}'. Cause: {}",
+            identity.getWorkspaceId(),
+            machineName,
+            serverRef,
+            e.getMessage());
+      }
     }
   }
 
@@ -480,49 +674,127 @@ public class KubernetesInternalRuntime<
     @Override
     public void accept(ProbeResult probeResult) {
       String machineName = probeResult.getMachineName();
-      KubernetesMachine machine = machines.get(machineName);
-      if (machine == null) {
-        // Probably machine was removed from the list during server check start due to some reason
-        return;
-      }
       String serverName = probeResult.getServerName();
       ProbeStatus probeStatus = probeResult.getStatus();
-      Server server = machine.getServers().get(serverName);
-      ServerStatus oldServerStatus = server.getStatus();
-      ServerStatus serverStatus;
 
-      if (probeStatus == ProbeStatus.FAILED && oldServerStatus == ServerStatus.RUNNING) {
+      ServerStatus serverStatus;
+      if (probeStatus == ProbeStatus.FAILED) {
         serverStatus = ServerStatus.STOPPED;
-      } else if (probeStatus == ProbeStatus.PASSED && (oldServerStatus != ServerStatus.RUNNING)) {
+      } else if (probeStatus == ProbeStatus.PASSED) {
         serverStatus = ServerStatus.RUNNING;
       } else {
         return;
       }
 
-      machine.setServerStatus(serverName, serverStatus);
-      eventPublisher.sendServerStatusEvent(
-          machineName,
-          serverName,
-          machine.getServers().get(serverName),
-          getContext().getIdentity());
+      RuntimeIdentity identity = getContext().getIdentity();
+      try {
+        if (machines.updateServerStatus(identity, machineName, serverName, serverStatus)) {
+          eventPublisher.sendServerStatusEvent(
+              machineName,
+              serverName,
+              machines.getServer(identity, machineName, serverName),
+              identity);
+        }
+      } catch (InfrastructureException e) {
+        LOG.error(
+            "Unable to update status of the server '{}:{}:{}'. Cause: {}",
+            identity.getWorkspaceId(),
+            machineName,
+            serverName,
+            e.getMessage());
+      }
+    }
+  }
+
+  /** Listens Pod events and terminates workspace if unrecoverable event occurs. */
+  public class UnrecoverablePodEventHandler implements PodEventHandler {
+    private Map<String, Pod> workspacePods;
+
+    public UnrecoverablePodEventHandler(Map<String, Pod> workspacePods) {
+      this.workspacePods = workspacePods;
+    }
+
+    /*
+     * Event is considered to be unrecoverable if it belongs to one of the workspace pods
+     * and 'lastTimestamp' of the event is *after* the time of handler initialization
+     */
+    @Override
+    public void handle(PodEvent event) {
+      if (isWorkspaceEvent(event) && isUnrecoverable(event)) {
+        String reason = event.getReason();
+        String message = event.getMessage();
+        String workspaceId = getContext().getIdentity().getWorkspaceId();
+        LOG.error(
+            "Unrecoverable event occurred during workspace '{}' startup: {}, {}, {}",
+            workspaceId,
+            reason,
+            message,
+            event.getPodName());
+
+        startSynchronizer.completeExceptionally(
+            new InfrastructureException(
+                format(
+                    "Unrecoverable event occurred: '%s', '%s', '%s'",
+                    reason, message, event.getPodName())));
+      }
+    }
+
+    /** Returns true if event belongs to one of the workspace pods, false otherwise */
+    private boolean isWorkspaceEvent(PodEvent event) {
+      String podName = event.getPodName();
+      return workspacePods.containsKey(podName);
+    }
+
+    /**
+     * Returns true if event reason or message matches one of the comma separated values defined in
+     * 'che.infra.kubernetes.workspace_unrecoverable_events',false otherwise
+     *
+     * @param event event to check
+     */
+    private boolean isUnrecoverable(PodEvent event) {
+      boolean isUnrecoverable = false;
+      String reason = event.getReason();
+      String message = event.getMessage();
+      // Consider unrecoverable if event reason 'equals' one of the property values e.g. "Failed
+      // Mount"
+      if (unrecoverableEvents.contains(reason)) {
+        isUnrecoverable = true;
+      } else {
+        for (String e : unrecoverableEvents) {
+          // Consider unrecoverable if event message 'startsWith' one of the property values e.g.
+          // "Failed to pull image"
+          if (message != null && message.startsWith(e)) {
+            isUnrecoverable = true;
+          }
+        }
+      }
+      return isUnrecoverable;
     }
   }
 
   /** Listens container's events and publish them as machine logs. */
-  class MachineLogsPublisher implements ContainerEventHandler {
+  public class MachineLogsPublisher implements PodEventHandler {
 
     @Override
-    public void handle(ContainerEvent event) {
+    public void handle(PodEvent event) {
       final String podName = event.getPodName();
       final String containerName = event.getContainerName();
-      for (Entry<String, KubernetesMachine> entry : machines.entrySet()) {
-        final KubernetesMachine machine = entry.getValue();
-        if (machine.getPodName().equals(podName)
-            && machine.getContainerName().equals(containerName)) {
-          eventPublisher.sendMachineLogEnvent(
-              entry.getKey(), event.getMessage(), event.getTime(), getContext().getIdentity());
-          return;
+      try {
+        for (Entry<String, KubernetesMachineImpl> entry :
+            machines.getMachines(getContext().getIdentity()).entrySet()) {
+          final KubernetesMachineImpl machine = entry.getValue();
+          if (machine.getPodName().equals(podName)
+              && machine.getContainerName().equals(containerName)) {
+            eventPublisher.sendMachineLogEnvent(
+                entry.getKey(),
+                event.getMessage(),
+                event.getCreationTimeStamp(),
+                getContext().getIdentity());
+            return;
+          }
         }
+      } catch (InfrastructureException e) {
+        LOG.error("Error while machine fetching for logs publishing. Cause: {}", e.getMessage());
       }
     }
   }
@@ -534,7 +806,7 @@ public class KubernetesInternalRuntime<
     public void handle(Action action, Pod pod) {
       // Cancels workspace servers probes if any
       probeScheduler.cancel(getContext().getIdentity().getWorkspaceId());
-      if (pod.getStatus() != null && POD_FAILED_STATUS.equals(pod.getStatus().getPhase())) {
+      if (pod.getStatus() != null && POD_STATUS_PHASE_FAILED.equals(pod.getStatus().getPhase())) {
         try {
           internalStop(emptyMap());
         } catch (InfrastructureException ex) {

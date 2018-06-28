@@ -11,6 +11,7 @@
 package org.eclipse.che.selenium.debugger;
 
 import static javax.ws.rs.core.MediaType.APPLICATION_FORM_URLENCODED;
+import static org.eclipse.che.selenium.core.constant.TestTimeoutsConstants.LOADER_TIMEOUT_SEC;
 import static org.testng.Assert.assertTrue;
 import static org.testng.Assert.fail;
 
@@ -18,6 +19,7 @@ import com.google.inject.Inject;
 import java.net.URL;
 import java.nio.file.Paths;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.TimeUnit;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import org.eclipse.che.commons.lang.NameGenerator;
@@ -29,6 +31,7 @@ import org.eclipse.che.selenium.core.constant.TestCommandsConstants;
 import org.eclipse.che.selenium.core.constant.TestMenuCommandsConstants;
 import org.eclipse.che.selenium.core.project.ProjectTemplates;
 import org.eclipse.che.selenium.core.workspace.TestWorkspace;
+import org.eclipse.che.selenium.pageobject.CheTerminal;
 import org.eclipse.che.selenium.pageobject.CodenvyEditor;
 import org.eclipse.che.selenium.pageobject.Consoles;
 import org.eclipse.che.selenium.pageobject.Ide;
@@ -38,7 +41,6 @@ import org.eclipse.che.selenium.pageobject.ToastLoader;
 import org.eclipse.che.selenium.pageobject.debug.DebugPanel;
 import org.eclipse.che.selenium.pageobject.debug.JavaDebugConfig;
 import org.eclipse.che.selenium.pageobject.intelligent.CommandsPalette;
-import org.eclipse.che.selenium.pageobject.machineperspective.MachineTerminal;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.testng.annotations.BeforeClass;
@@ -78,7 +80,7 @@ public class ChangeVariableWithEvaluatingTest {
   @Inject private TestWorkspaceServiceClient workspaceServiceClient;
   @Inject private TestProjectServiceClient testProjectServiceClient;
   @Inject private CommandsPalette commandsPalette;
-  @Inject private MachineTerminal machineTerminal;
+  @Inject private CheTerminal machineTerminal;
 
   @BeforeClass
   public void prepare() throws Exception {
@@ -132,7 +134,7 @@ public class ChangeVariableWithEvaluatingTest {
             + "/spring/guess";
     String requestMess = "numGuess=11&submit=Ok";
     editor.waitActiveBreakpoint(34);
-    CompletableFuture<String> instToRequestThread =
+    CompletableFuture<String> requestToApplication =
         debuggerUtils.gotoDebugAppAndSendRequest(
             appUrl, requestMess, APPLICATION_FORM_URLENCODED, 200);
     debugPanel.openDebugPanel();
@@ -152,15 +154,20 @@ public class ChangeVariableWithEvaluatingTest {
     debugPanel.waitExpectedResultInEvaluateExpression("false");
     debugPanel.clickCloseEvaluateBtn();
     debugPanel.clickOnButton(DebugPanel.DebuggerActionButtons.RESUME_BTN_ID);
-    // TODO try/catch should be removed after fixing: https://github.com/eclipse/che/issues/8105
-    // this auxiliary method for investigate problem that was described in the issue:
-    // https://github.com/eclipse/che/issues/8105
+
+    String applicationResponse = requestToApplication.get(LOADER_TIMEOUT_SEC, TimeUnit.SECONDS);
+    // remove try-catch block after issue has been resolved
     try {
-      assertTrue(instToRequestThread.get().contains("Sorry, you failed. Try again later!"));
+      assertTrue(
+          applicationResponse.contains("Sorry, you failed. Try again later!"),
+          "Actual application response content was: " + applicationResponse);
     } catch (AssertionError ex) {
-      machineTerminal.launchScriptAndGetInfo(
-          ws, PROJECT_NAME_CHANGE_VARIABLE, testProjectServiceClient);
-      fail("Known issue: https://github.com/eclipse/che/issues/8105");
+      machineTerminal.logApplicationInfo(PROJECT_NAME_CHANGE_VARIABLE, ws);
+      if (applicationResponse != null && applicationResponse.contains("504 Gateway Time-out")) {
+        fail("Known issue: https://github.com/eclipse/che/issues/9251", ex);
+      } else {
+        throw ex;
+      }
     }
   }
 

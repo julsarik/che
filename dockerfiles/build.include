@@ -21,6 +21,13 @@ skip_tests() {
   fi
 }
 
+prepare_build_args() {
+    IFS=',' read -r -a BUILD_ARGS_ARRAY <<< "$@"
+    for i in ${BUILD_ARGS_ARRAY[@]}; do
+    BUILD_ARGS+="--build-arg $i "
+    done
+}
+
 init() {
   BLUE='\033[1;34m'
   GREEN='\033[0;32m'
@@ -39,6 +46,7 @@ init() {
   ARGS=""
   OPTIONS=""
   DOCKERFILE=""
+  BUILD_ARGS=""
 
   while [ $# -gt 0 ]; do
     case $1 in
@@ -68,6 +76,10 @@ init() {
         shift ;;
       --dockerfile:*)
         DOCKERFILE="${1#*:}"
+        shift ;;
+      --build-arg*:*)
+        BUILD_ARGS_CSV="${1#*:}"
+        prepare_build_args $BUILD_ARGS_CSV
         shift ;;
       --*)
         printf "${RED}Unknown parameter: $1${NC}\n"; exit 2 ;;
@@ -116,7 +128,7 @@ build_image() {
   printf "${BOLD}Building Docker Image ${IMAGE_NAME} from $DIR directory with tag $TAG${NC}\n"
   # Replace macros in Dockerfiles
   cat ${DIR}/${DOCKERFILE} | sed s/\$\{BUILD_ORGANIZATION\}/${ORGANIZATION}/ | sed s/\$\{BUILD_PREFIX\}/${PREFIX}/ | sed s/\$\{BUILD_TAG\}/${TAG}/ > ${DIR}/.Dockerfile
-  cd "${DIR}" && docker build -f ${DIR}/.Dockerfile -t ${IMAGE_NAME} .
+  cd "${DIR}" && docker build -f ${DIR}/.Dockerfile -t ${IMAGE_NAME} ${BUILD_ARGS} .
   rm ${DIR}/.Dockerfile
   if [ $? -eq 0 ]; then
     printf "Build of ${BLUE}${IMAGE_NAME} ${GREEN}[OK]${NC}\n"

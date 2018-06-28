@@ -20,7 +20,8 @@ import org.eclipse.che.selenium.core.client.TestFactoryServiceClient;
 import org.eclipse.che.selenium.core.client.TestProjectServiceClient;
 import org.eclipse.che.selenium.core.client.TestWorkspaceServiceClient;
 import org.eclipse.che.selenium.core.constant.TestMenuCommandsConstants;
-import org.eclipse.che.selenium.core.user.TestUser;
+import org.eclipse.che.selenium.core.user.DefaultTestUser;
+import org.eclipse.che.selenium.core.webdriver.SeleniumWebDriverHelper;
 import org.eclipse.che.selenium.core.workspace.TestWorkspace;
 import org.eclipse.che.selenium.pageobject.Events;
 import org.eclipse.che.selenium.pageobject.Ide;
@@ -45,7 +46,7 @@ public class CreateNamedFactoryFromDashboardTest {
 
   @Inject private TestWorkspace testWorkspace;
   @Inject private Ide ide;
-  @Inject private TestUser user;
+  @Inject private DefaultTestUser user;
   @Inject private DashboardFactories dashboardFactories;
   @Inject private Dashboard dashboard;
   @Inject private LoadingBehaviorPage loadingBehaviorPage;
@@ -54,6 +55,7 @@ public class CreateNamedFactoryFromDashboardTest {
   @Inject private NotificationsPopupPanel notificationsPopupPanel;
   @Inject private MavenPluginStatusBar mavenPluginStatusBar;
   @Inject private SeleniumWebDriver seleniumWebDriver;
+  @Inject private SeleniumWebDriverHelper seleniumWebDriverHelper;
   @Inject private TestProjectServiceClient testProjectServiceClient;
   @Inject private Wizard wizard;
   @Inject private Menu menu;
@@ -89,9 +91,9 @@ public class CreateNamedFactoryFromDashboardTest {
     dashboardFactories.waitJsonFactoryIsNotEmpty();
     dashboard.waitNotificationIsClosed();
     dashboardFactories.clickFactoryIDUrl();
-    seleniumWebDriver.switchToNoneCurrentWindow(currentWin);
+    seleniumWebDriverHelper.switchToNextWindow(currentWin);
     loadingBehaviorPage.waitWhileLoadPageIsClosed();
-    seleniumWebDriver.switchFromDashboardIframeToIde();
+    seleniumWebDriverHelper.switchToIdeFrameAndWaitAvailability();
     projectExplorer.waitItem(PROJECT_NAME);
     events.clickEventLogBtn();
     events.waitExpectedMessage(CONFIGURING_PROJECT_AND_CLONING_SOURCE_CODE);

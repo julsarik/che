@@ -15,14 +15,14 @@ import static org.eclipse.che.selenium.core.constant.TestTimeoutsConstants.ELEME
 import static org.eclipse.che.selenium.core.constant.TestTimeoutsConstants.EXPECTED_MESS_IN_CONSOLE_SEC;
 import static org.eclipse.che.selenium.core.constant.TestTimeoutsConstants.LOAD_PAGE_TIMEOUT_SEC;
 import static org.eclipse.che.selenium.core.constant.TestTimeoutsConstants.REDRAW_UI_ELEMENTS_TIMEOUT_SEC;
-import static org.openqa.selenium.support.ui.ExpectedConditions.invisibilityOfElementLocated;
-import static org.openqa.selenium.support.ui.ExpectedConditions.visibilityOf;
-import static org.openqa.selenium.support.ui.ExpectedConditions.visibilityOfElementLocated;
+import static org.eclipse.che.selenium.core.constant.TestTimeoutsConstants.UPDATING_PROJECT_TIMEOUT_SEC;
+import static org.eclipse.che.selenium.core.constant.TestTimeoutsConstants.WIDGET_TIMEOUT_SEC;
 
 import com.google.inject.Inject;
 import com.google.inject.Singleton;
 import org.eclipse.che.selenium.core.SeleniumWebDriver;
 import org.eclipse.che.selenium.core.utils.WaitUtils;
+import org.eclipse.che.selenium.core.webdriver.SeleniumWebDriverHelper;
 import org.openqa.selenium.By;
 import org.openqa.selenium.StaleElementReferenceException;
 import org.openqa.selenium.TimeoutException;
@@ -33,37 +33,45 @@ import org.openqa.selenium.support.PageFactory;
 import org.openqa.selenium.support.ui.ExpectedCondition;
 import org.openqa.selenium.support.ui.WebDriverWait;
 
-/**
- * //
- *
- * @author Musienko Maxim
- */
+/** @author Musienko Maxim */
 @Singleton
 public class ToastLoader {
   private final SeleniumWebDriver seleniumWebDriver;
+  private final SeleniumWebDriverHelper seleniumWebDriverHelper;
+  private final ProjectExplorer projectExplorer;
+  private final Loader loader;
 
   @Inject
-  public ToastLoader(SeleniumWebDriver seleniumWebDriver) {
+  public ToastLoader(
+      SeleniumWebDriver seleniumWebDriver,
+      SeleniumWebDriverHelper seleniumWebDriverHelper,
+      ProjectExplorer projectExplorer,
+      Loader loader) {
     this.seleniumWebDriver = seleniumWebDriver;
+    this.seleniumWebDriverHelper = seleniumWebDriverHelper;
+    this.projectExplorer = projectExplorer;
+    this.loader = loader;
     PageFactory.initElements(seleniumWebDriver, this);
   }
 
   private interface Locators {
-    String MAIN_FORM = "gwt-debug-popupLoader";
-    String START_BUTTON = "//button[text()='Start']";
-    String MAINFORM_WITH_TEXT_CONTAINER =
+    String MAIN_FORM_ID = "gwt-debug-popupLoader";
+    String TOAST_LOADER_BUTTON_XPATH_PATTERN =
+        "//div[@id='gwt-debug-popupLoader']//button[text()='%s']";
+    String MAINFORM_WITH_TEXT_CONTAINER_XPATH_PATTERN =
         "//div[@id='gwt-debug-popupLoader']/div[contains(text(),'%s')]";
   }
 
-  @FindBy(id = Locators.MAIN_FORM)
+  @FindBy(id = Locators.MAIN_FORM_ID)
   WebElement mainForm;
-
-  @FindBy(xpath = Locators.START_BUTTON)
-  WebElement startBtn;
 
   /** wait appearance toast loader widget */
   public void waitToastLoaderIsOpen() {
-    new WebDriverWait(seleniumWebDriver, ELEMENT_TIMEOUT_SEC).until(visibilityOf(mainForm));
+    seleniumWebDriverHelper.waitVisibility(mainForm, UPDATING_PROJECT_TIMEOUT_SEC);
+  }
+
+  public Boolean isToastLoaderOpened() {
+    return seleniumWebDriverHelper.isVisible(mainForm);
   }
 
   /**
@@ -72,10 +80,7 @@ public class ToastLoader {
    * @param expText
    */
   public void waitExpectedTextInToastLoader(String expText) {
-    new WebDriverWait(seleniumWebDriver, EXPECTED_MESS_IN_CONSOLE_SEC)
-        .until(
-            visibilityOfElementLocated(
-                By.xpath(format(Locators.MAINFORM_WITH_TEXT_CONTAINER, expText))));
+    waitExpectedTextInToastLoader(expText, EXPECTED_MESS_IN_CONSOLE_SEC);
   }
 
   /**
@@ -85,16 +90,13 @@ public class ToastLoader {
    * @param timeout timeout sets in seconds
    */
   public void waitExpectedTextInToastLoader(String expText, int timeout) {
-    new WebDriverWait(seleniumWebDriver, timeout)
-        .until(
-            visibilityOfElementLocated(
-                By.xpath(format(Locators.MAINFORM_WITH_TEXT_CONTAINER, expText))));
+    seleniumWebDriverHelper.waitVisibility(
+        By.xpath(format(Locators.MAINFORM_WITH_TEXT_CONTAINER_XPATH_PATTERN, expText)), timeout);
   }
 
   /** wait for closing of widget */
   public void waitToastLoaderIsClosed() {
-    new WebDriverWait(seleniumWebDriver, REDRAW_UI_ELEMENTS_TIMEOUT_SEC)
-        .until(invisibilityOfElementLocated(By.id(Locators.MAIN_FORM)));
+    waitToastLoaderIsClosed(ELEMENT_TIMEOUT_SEC);
   }
 
   /**
@@ -103,8 +105,7 @@ public class ToastLoader {
    * @param userTimeout timeout defined by user
    */
   public void waitToastLoaderIsClosed(int userTimeout) {
-    new WebDriverWait(seleniumWebDriver, userTimeout)
-        .until(invisibilityOfElementLocated(By.id(Locators.MAIN_FORM)));
+    seleniumWebDriverHelper.waitInvisibility(mainForm, userTimeout);
   }
 
   /** wait appearance the 'Toast widget' with some text, and wait disappearance this one */
@@ -188,20 +189,29 @@ public class ToastLoader {
   }
 
   public String getTextFromToastLoader() {
-    return new WebDriverWait(seleniumWebDriver, REDRAW_UI_ELEMENTS_TIMEOUT_SEC)
-        .until(visibilityOf(mainForm))
-        .getText();
+    return seleniumWebDriverHelper.waitVisibilityAndGetText(mainForm);
   }
 
-  /** wait appearance of start button in the widget */
-  public void waitStartButtonInToastLoader() {
-    new WebDriverWait(seleniumWebDriver, REDRAW_UI_ELEMENTS_TIMEOUT_SEC)
-        .until(visibilityOf(startBtn));
+  /** wait appearance of button in the widget */
+  public void waitToastLoaderButton(String buttonName) {
+    seleniumWebDriverHelper.waitVisibility(
+        By.xpath(format(Locators.TOAST_LOADER_BUTTON_XPATH_PATTERN, buttonName)),
+        WIDGET_TIMEOUT_SEC);
   }
 
-  /** wait appearance of start button in the widget and click on this one */
-  public void clickOnStartButton() {
-    waitStartButtonInToastLoader();
-    startBtn.click();
+  /** wait appearance of button in the widget and click on this one */
+  public void clickOnToastLoaderButton(String buttonName) {
+    loader.waitOnClosed();
+    seleniumWebDriverHelper.waitAndClick(
+        By.xpath(format(Locators.TOAST_LOADER_BUTTON_XPATH_PATTERN, buttonName)));
+  }
+
+  public void waitToastLoaderAndClickStartButton() {
+    projectExplorer.waitProjectExplorer();
+    try {
+      seleniumWebDriverHelper.waitInvisibility(mainForm, REDRAW_UI_ELEMENTS_TIMEOUT_SEC);
+    } catch (TimeoutException ex) {
+      clickOnToastLoaderButton("Start");
+    }
   }
 }

@@ -26,10 +26,11 @@ import org.eclipse.che.selenium.core.client.TestProjectServiceClient;
 import org.eclipse.che.selenium.core.client.TestUserPreferencesServiceClient;
 import org.eclipse.che.selenium.core.constant.TestMenuCommandsConstants;
 import org.eclipse.che.selenium.core.project.ProjectTemplates;
-import org.eclipse.che.selenium.core.user.TestUser;
+import org.eclipse.che.selenium.core.user.DefaultTestUser;
 import org.eclipse.che.selenium.core.workspace.TestWorkspace;
 import org.eclipse.che.selenium.pageobject.AskDialog;
 import org.eclipse.che.selenium.pageobject.AskForValueDialog;
+import org.eclipse.che.selenium.pageobject.CheTerminal;
 import org.eclipse.che.selenium.pageobject.CodenvyEditor;
 import org.eclipse.che.selenium.pageobject.Ide;
 import org.eclipse.che.selenium.pageobject.Loader;
@@ -39,7 +40,6 @@ import org.eclipse.che.selenium.pageobject.Wizard;
 import org.eclipse.che.selenium.pageobject.git.Git;
 import org.eclipse.che.selenium.pageobject.git.GitCompare;
 import org.eclipse.che.selenium.pageobject.git.GitPanel;
-import org.eclipse.che.selenium.pageobject.machineperspective.MachineTerminal;
 import org.openqa.selenium.By;
 import org.openqa.selenium.Keys;
 import org.testng.annotations.BeforeClass;
@@ -64,12 +64,12 @@ public class GitPanelTest {
   private static final String JAVA_SPRING_DELETED_FILE_NAME = "spring-servlet.xml";
   private static final String JAVA_SPRING_ADDED_FILE_NAME = "test.java";
 
-  @Inject(optional = true)
+  @Inject
   @Named("github.username")
   private String gitHubUsername;
 
   @Inject private SeleniumWebDriver seleniumWebDriver;
-  @Inject private TestUser productUser;
+  @Inject private DefaultTestUser productUser;
   @Inject private TestWorkspace workspace;
   @Inject private Ide ide;
   @Inject private Loader loader;
@@ -78,7 +78,7 @@ public class GitPanelTest {
   @Inject private Menu menu;
   @Inject private ProjectExplorer projectExplorer;
   @Inject private CodenvyEditor editor;
-  @Inject private MachineTerminal terminal;
+  @Inject private CheTerminal terminal;
   @Inject private AskDialog askDialog;
   @Inject private AskForValueDialog askForValueDialog;
   @Inject private TestUserPreferencesServiceClient testUserPreferencesServiceClient;

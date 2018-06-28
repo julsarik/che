@@ -1183,6 +1183,12 @@ public interface CoreLocalizationConstant extends Messages {
   @Key("messages.machine.not.found")
   String machineNotFound(String machineId);
 
+  @Key("message.projectCreated")
+  String projectCreated(String projectName);
+
+  @Key("message.switch.editors.in.readOnly.mode")
+  String messageSwitchEditorsInReadOnlyMode();
+
   @Key("ssh.connect.info")
   String sshConnectInfo(
       String machineName,

@@ -45,12 +45,13 @@ import org.eclipse.che.api.project.server.handlers.ProjectInitHandler;
 import org.eclipse.che.api.project.server.type.AttributeValue;
 import org.eclipse.che.api.project.server.type.BaseProjectType;
 import org.eclipse.che.api.project.shared.NewProjectConfig;
+import org.eclipse.che.api.project.shared.RegisteredProject;
 
 @Singleton
 public class ProjectImportManager {
 
   private final FsManager fsManager;
-  private final ProjectSynchronizer projectSynchronizer;
+  private final WorkspaceProjectSynchronizer projectSynchronizer;
   private final ProjectConfigRegistry projectConfigRegistry;
   private final ProjectImporterRegistry projectImporterRegistry;
   private final ProjectHandlerRegistry projectHandlerRegistry;
@@ -59,7 +60,7 @@ public class ProjectImportManager {
   public ProjectImportManager(
       FsManager fsManager,
       ProjectConfigRegistry projectConfigs,
-      ProjectSynchronizer projectSynchronizer,
+      WorkspaceProjectSynchronizer projectSynchronizer,
       ProjectImporterRegistry projectImporterRegistry,
       ProjectHandlerRegistry projectHandlerRegistry) {
     this.fsManager = fsManager;
@@ -304,12 +305,12 @@ public class ProjectImportManager {
     }
 
     if (projectSynchronizer
-        .getAll()
+        .getProjects()
         .stream()
         .anyMatch(it -> Objects.equals(it.getPath(), wsPath))) {
       Set<ProjectConfig> newProjectConfigs =
           projectSynchronizer
-              .getAll()
+              .getProjects()
               .stream()
               .filter(it -> wsPath.startsWith(it.getPath()))
               .collect(toSet());

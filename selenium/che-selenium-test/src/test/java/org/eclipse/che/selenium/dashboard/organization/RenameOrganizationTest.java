@@ -16,13 +16,11 @@ import static org.eclipse.che.selenium.pageobject.dashboard.organization.Organiz
 import static org.testng.Assert.assertEquals;
 import static org.testng.Assert.assertFalse;
 import static org.testng.Assert.assertTrue;
-import static org.testng.Assert.fail;
 
 import com.google.inject.Inject;
 import org.eclipse.che.selenium.core.TestGroup;
 import org.eclipse.che.selenium.core.organization.InjectTestOrganization;
 import org.eclipse.che.selenium.core.organization.TestOrganization;
-import org.eclipse.che.selenium.core.user.AdminTestUser;
 import org.eclipse.che.selenium.core.user.TestUser;
 import org.eclipse.che.selenium.pageobject.dashboard.Dashboard;
 import org.eclipse.che.selenium.pageobject.dashboard.EditMode;
@@ -60,7 +58,6 @@ public class RenameOrganizationTest {
   @Inject private EditMode editMode;
   @Inject private Dashboard dashboard;
   @Inject private TestUser testUser;
-  @Inject private AdminTestUser adminTestUser;
 
   @BeforeClass
   public void setUp() throws Exception {
@@ -129,13 +126,7 @@ public class RenameOrganizationTest {
     organizationPage.clickBackButton();
     organizationListPage.waitForOrganizationsList();
 
-    try {
-      assertTrue(organizationListPage.getValues(NAME).contains(newChildOrgQualifiedName));
-    } catch (AssertionError ex) {
-      // remove try-catch block after issue has been resolved
-      fail("Known issue https://github.com/eclipse/che/issues/8668");
-    }
-
+    assertTrue(organizationListPage.getValues(NAME).contains(newChildOrgQualifiedName));
     assertTrue(organizationListPage.getValues(NAME).contains(NEW_PARENT_ORG_NAME));
   }
 

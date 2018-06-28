@@ -15,11 +15,16 @@ import static org.testng.Assert.assertEquals;
 
 import com.google.inject.Inject;
 import com.google.inject.name.Named;
+import java.io.IOException;
+import java.nio.file.Path;
+import java.nio.file.Paths;
 import org.eclipse.che.selenium.core.SeleniumWebDriver;
 import org.eclipse.che.selenium.core.TestGroup;
+import org.eclipse.che.selenium.core.client.TestGitHubRepository;
 import org.eclipse.che.selenium.core.client.TestGitHubServiceClient;
 import org.eclipse.che.selenium.core.client.TestWorkspaceServiceClient;
-import org.eclipse.che.selenium.core.user.TestUser;
+import org.eclipse.che.selenium.core.user.DefaultTestUser;
+import org.eclipse.che.selenium.core.webdriver.SeleniumWebDriverHelper;
 import org.eclipse.che.selenium.pageobject.ProjectExplorer;
 import org.eclipse.che.selenium.pageobject.dashboard.Dashboard;
 import org.eclipse.che.selenium.pageobject.dashboard.NewWorkspace;
@@ -38,11 +43,11 @@ public class AuthorizeOnGithubFromDashboardTest {
   private static final Logger LOG =
       LoggerFactory.getLogger(AuthorizeOnGithubFromDashboardTest.class);
 
-  @Inject(optional = true)
+  @Inject
   @Named("github.username")
   private String gitHubUsername;
 
-  @Inject(optional = true)
+  @Inject
   @Named("github.password")
   private String gitHubPassword;
 
@@ -52,14 +57,17 @@ public class AuthorizeOnGithubFromDashboardTest {
 
   @Inject private Dashboard dashboard;
   @Inject private Workspaces workspaces;
-  @Inject private TestUser defaultTestUser;
+  @Inject private DefaultTestUser defaultTestUser;
   @Inject private ProjectExplorer projectExplorer;
   @Inject private NewWorkspace newWorkspace;
   @Inject private ProjectSourcePage projectSourcePage;
   @Inject private SeleniumWebDriver seleniumWebDriver;
+  @Inject private SeleniumWebDriverHelper seleniumWebDriverHelper;
   @Inject private TestWorkspaceServiceClient workspaceServiceClient;
   @Inject private TestGitHubServiceClient gitHubClientService;
   @Inject private KeycloakFederatedIdentitiesPage keycloakFederatedIdentitiesPage;
+  @Inject private TestGitHubRepository testRepo;
+  @Inject private TestGitHubRepository testRepo2;
 
   @BeforeClass(groups = TestGroup.MULTIUSER)
   @AfterClass(groups = TestGroup.MULTIUSER)
@@ -80,7 +88,13 @@ public class AuthorizeOnGithubFromDashboardTest {
   }
 
   @Test
-  public void checkAuthorizationOnGithubWhenLoadProjectList() {
+  public void checkAuthorizationOnGithubWhenLoadProjectList() throws IOException {
+    // need to add projects if the github account doesn't have any repos that displayed in the list
+    Path entryPath =
+        Paths.get(getClass().getResource("/projects/default-spring-project").getPath());
+    testRepo.addContent(entryPath);
+    testRepo2.addContent(entryPath);
+
     dashboard.open();
 
     String ideWin = seleniumWebDriver.getWindowHandle();
@@ -95,7 +109,7 @@ public class AuthorizeOnGithubFromDashboardTest {
     projectSourcePage.clickOnConnectGithubAccountButton();
 
     // login to github
-    seleniumWebDriver.switchToNoneCurrentWindow(ideWin);
+    seleniumWebDriverHelper.switchToNextWindow(ideWin);
     projectSourcePage.waitAuthorizationPageOpened();
     projectSourcePage.typeLogin(gitHubUsername);
     projectSourcePage.typePassword(gitHubPassword);
@@ -119,7 +133,12 @@ public class AuthorizeOnGithubFromDashboardTest {
     // check GitHub identity is present in Keycloak account management page
     if (isMultiuser) {
       keycloakFederatedIdentitiesPage.open();
-      assertEquals(keycloakFederatedIdentitiesPage.getGitHubIdentityFieldValue(), gitHubUsername);
+
+      // set to lower case because it's normal behaviour (issue:
+      // https://github.com/eclipse/che/issues/10138)
+      assertEquals(
+          keycloakFederatedIdentitiesPage.getGitHubIdentityFieldValue(),
+          gitHubUsername.toLowerCase());
     }
   }
 }

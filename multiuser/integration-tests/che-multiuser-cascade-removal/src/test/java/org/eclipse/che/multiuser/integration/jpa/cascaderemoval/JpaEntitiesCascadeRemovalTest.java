@@ -70,14 +70,19 @@ import org.eclipse.che.api.user.server.model.impl.UserImpl;
 import org.eclipse.che.api.user.server.spi.PreferenceDao;
 import org.eclipse.che.api.user.server.spi.ProfileDao;
 import org.eclipse.che.api.user.server.spi.UserDao;
+import org.eclipse.che.api.workspace.server.DefaultWorkspaceLockService;
+import org.eclipse.che.api.workspace.server.DefaultWorkspaceStatusCache;
+import org.eclipse.che.api.workspace.server.WorkspaceLockService;
 import org.eclipse.che.api.workspace.server.WorkspaceManager;
 import org.eclipse.che.api.workspace.server.WorkspaceSharedPool;
+import org.eclipse.che.api.workspace.server.WorkspaceStatusCache;
 import org.eclipse.che.api.workspace.server.model.impl.WorkspaceImpl;
 import org.eclipse.che.api.workspace.server.model.impl.stack.StackImpl;
 import org.eclipse.che.api.workspace.server.spi.RuntimeInfrastructure;
 import org.eclipse.che.api.workspace.server.spi.StackDao;
 import org.eclipse.che.api.workspace.server.spi.WorkspaceDao;
 import org.eclipse.che.api.workspace.server.spi.environment.InternalEnvironmentFactory;
+import org.eclipse.che.api.workspace.server.wsnext.WorkspaceNextApplier;
 import org.eclipse.che.commons.env.EnvironmentContext;
 import org.eclipse.che.commons.lang.Pair;
 import org.eclipse.che.commons.subject.SubjectImpl;
@@ -227,6 +232,8 @@ public class JpaEntitiesCascadeRemovalTest {
                 bind(FreeResourcesLimitDao.class).to(JpaFreeResourcesLimitDao.class);
                 bind(RemoveFreeResourcesLimitSubscriber.class).asEagerSingleton();
                 bind(WorkspaceManager.class);
+                bind(WorkspaceLockService.class).to(DefaultWorkspaceLockService.class);
+                bind(WorkspaceStatusCache.class).to(DefaultWorkspaceStatusCache.class);
                 bind(RuntimeInfrastructure.class).toInstance(mock(RuntimeInfrastructure.class));
                 MapBinder.newMapBinder(binder(), String.class, InternalEnvironmentFactory.class);
                 bind(AccountManager.class);
@@ -247,6 +254,10 @@ public class JpaEntitiesCascadeRemovalTest {
                 Multibinder.newSetBinder(binder(), ResourceLockKeyProvider.class);
                 Multibinder.newSetBinder(binder(), ResourceUsageTracker.class);
                 MapBinder.newMapBinder(binder(), String.class, AvailableResourcesProvider.class);
+                bind(String.class)
+                    .annotatedWith(Names.named("che.workspace.feature.api"))
+                    .toInstance("");
+                MapBinder.newMapBinder(binder(), String.class, WorkspaceNextApplier.class);
                 Multibinder.newSetBinder(binder(), ResourceType.class)
                     .addBinding()
                     .to(RamResourceType.class);

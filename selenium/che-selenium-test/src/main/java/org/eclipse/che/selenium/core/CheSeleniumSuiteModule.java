@@ -10,22 +10,25 @@
  */
 package org.eclipse.che.selenium.core;
 
+import static com.google.inject.name.Names.named;
 import static java.lang.Boolean.parseBoolean;
 import static java.lang.String.format;
 import static org.eclipse.che.selenium.core.utils.PlatformUtils.isMac;
 import static org.eclipse.che.selenium.core.workspace.WorkspaceTemplate.DEFAULT;
 
 import com.google.inject.AbstractModule;
+import com.google.inject.Key;
 import com.google.inject.Provides;
+import com.google.inject.TypeLiteral;
 import com.google.inject.assistedinject.FactoryModuleBuilder;
-import com.google.inject.name.Names;
-import javax.inject.Named;
+import com.google.inject.name.Named;
+import java.io.IOException;
 import org.eclipse.che.api.core.rest.HttpJsonRequestFactory;
 import org.eclipse.che.selenium.core.action.ActionsFactory;
 import org.eclipse.che.selenium.core.action.GenericActionsFactory;
 import org.eclipse.che.selenium.core.action.MacOSActionsFactory;
 import org.eclipse.che.selenium.core.client.CheTestUserServiceClient;
-import org.eclipse.che.selenium.core.client.TestOrganizationServiceClient;
+import org.eclipse.che.selenium.core.client.TestGitHubRepository;
 import org.eclipse.che.selenium.core.client.TestUserServiceClient;
 import org.eclipse.che.selenium.core.client.TestUserServiceClientFactory;
 import org.eclipse.che.selenium.core.client.TestWorkspaceServiceClientFactory;
@@ -37,18 +40,20 @@ import org.eclipse.che.selenium.core.provider.CheTestDashboardUrlProvider;
 import org.eclipse.che.selenium.core.provider.CheTestIdeUrlProvider;
 import org.eclipse.che.selenium.core.provider.CheTestOfflineToAccessTokenExchangeApiEndpointUrlProvider;
 import org.eclipse.che.selenium.core.provider.CheTestWorkspaceAgentApiEndpointUrlProvider;
+import org.eclipse.che.selenium.core.provider.DefaultTestUserProvider;
 import org.eclipse.che.selenium.core.provider.TestApiEndpointUrlProvider;
 import org.eclipse.che.selenium.core.provider.TestDashboardUrlProvider;
 import org.eclipse.che.selenium.core.provider.TestIdeUrlProvider;
 import org.eclipse.che.selenium.core.provider.TestOfflineToAccessTokenExchangeApiEndpointUrlProvider;
 import org.eclipse.che.selenium.core.provider.TestWorkspaceAgentApiEndpointUrlProvider;
-import org.eclipse.che.selenium.core.requestfactory.CheTestAdminHttpJsonRequestFactory;
-import org.eclipse.che.selenium.core.requestfactory.CheTestDefaultUserHttpJsonRequestFactory;
+import org.eclipse.che.selenium.core.requestfactory.CheTestDefaultHttpJsonRequestFactory;
 import org.eclipse.che.selenium.core.requestfactory.TestUserHttpJsonRequestFactory;
 import org.eclipse.che.selenium.core.requestfactory.TestUserHttpJsonRequestFactoryCreator;
-import org.eclipse.che.selenium.core.user.CheDefaultTestUser;
-import org.eclipse.che.selenium.core.user.TestUser;
+import org.eclipse.che.selenium.core.user.DefaultTestUser;
 import org.eclipse.che.selenium.core.user.TestUserFactory;
+import org.eclipse.che.selenium.core.webdriver.DownloadedFileUtil;
+import org.eclipse.che.selenium.core.webdriver.DownloadedIntoGridFileUtilImpl;
+import org.eclipse.che.selenium.core.webdriver.DownloadedLocallyFileUtilImpl;
 import org.eclipse.che.selenium.core.webdriver.log.WebDriverLogsReaderFactory;
 import org.eclipse.che.selenium.core.workspace.CheTestWorkspaceUrlResolver;
 import org.eclipse.che.selenium.core.workspace.TestWorkspace;
@@ -61,27 +66,31 @@ import org.eclipse.che.selenium.pageobject.PageObjectsInjectorImpl;
  * Guice module per suite.
  *
  * @author Anatolii Bazko
+ * @author Dmytro Nochevnov
  */
 public class CheSeleniumSuiteModule extends AbstractModule {
 
+  public static final String AUXILIARY = "auxiliary";
+  public static final String DOCKER_INFRASTRUCTURE = "docker";
+  public static final String OPENSHIFT_INFRASTRUCTURE = "openshift";
+
   private static final String CHE_MULTIUSER_VARIABLE = "CHE_MULTIUSER";
   private static final String CHE_INFRASTRUCTURE_VARIABLE = "CHE_INFRASTRUCTURE";
-  private static final String DOCKER_INFRASTRUCTURE = "docker";
-  private static final String OPENSHIFT_INFRASTRUCTURE = "openshift";
 
   @Override
   public void configure() {
     TestConfiguration config = new SeleniumTestConfiguration();
-    config
-        .getMap()
-        .forEach((key, value) -> bindConstant().annotatedWith(Names.named(key)).to(value));
+    config.getMap().forEach((key, value) -> bindConstant().annotatedWith(named(key)).to(value));
 
-    bind(TestUser.class).to(CheDefaultTestUser.class);
+    bind(DefaultTestUser.class).toProvider(DefaultTestUserProvider.class);
+    install(
+        new FactoryModuleBuilder()
+            .build(Key.get(new TypeLiteral<TestUserFactory<DefaultTestUser>>() {}.getType())));
 
     bind(TestUserServiceClient.class).to(CheTestUserServiceClient.class);
 
     bind(HttpJsonRequestFactory.class).to(TestUserHttpJsonRequestFactory.class);
-    bind(TestUserHttpJsonRequestFactory.class).to(CheTestDefaultUserHttpJsonRequestFactory.class);
+    bind(TestUserHttpJsonRequestFactory.class).to(CheTestDefaultHttpJsonRequestFactory.class);
 
     bind(TestApiEndpointUrlProvider.class).to(CheTestApiEndpointUrlProvider.class);
     bind(TestIdeUrlProvider.class).to(CheTestIdeUrlProvider.class);
@@ -96,7 +105,6 @@ public class CheSeleniumSuiteModule extends AbstractModule {
 
     install(new FactoryModuleBuilder().build(TestUserHttpJsonRequestFactoryCreator.class));
     install(new FactoryModuleBuilder().build(TestWorkspaceServiceClientFactory.class));
-    install(new FactoryModuleBuilder().build(TestUserFactory.class));
     install(new FactoryModuleBuilder().build(TestUserServiceClientFactory.class));
     install(new FactoryModuleBuilder().build(WebDriverLogsReaderFactory.class));
 
@@ -122,29 +130,37 @@ public class CheSeleniumSuiteModule extends AbstractModule {
       throw new RuntimeException(
           format("Infrastructure '%s' hasn't been supported by tests.", cheInfrastructure));
     }
+
+    boolean gridMode = Boolean.valueOf(System.getProperty("grid.mode"));
+    if (gridMode) {
+      bind(DownloadedFileUtil.class).to(DownloadedIntoGridFileUtilImpl.class);
+    } else {
+      bind(DownloadedFileUtil.class).to(DownloadedLocallyFileUtilImpl.class);
+    }
   }
 
   @Provides
   public TestWorkspace getWorkspace(
       TestWorkspaceProvider workspaceProvider,
-      TestUser testUser,
+      DefaultTestUser testUser,
       @Named("workspace.default_memory_gb") int defaultMemoryGb)
       throws Exception {
-    TestWorkspace ws = workspaceProvider.createWorkspace(testUser, defaultMemoryGb, DEFAULT);
+    TestWorkspace ws = workspaceProvider.createWorkspace(testUser, defaultMemoryGb, DEFAULT, true);
     ws.await();
     return ws;
   }
 
   @Provides
-  @Named("admin")
-  public TestOrganizationServiceClient getAdminOrganizationServiceClient(
-      TestApiEndpointUrlProvider apiEndpointUrlProvider,
-      CheTestAdminHttpJsonRequestFactory requestFactory) {
-    return new TestOrganizationServiceClient(apiEndpointUrlProvider, requestFactory);
+  public ActionsFactory getActionFactory() {
+    return isMac() ? new MacOSActionsFactory() : new GenericActionsFactory();
   }
 
   @Provides
-  public ActionsFactory getActionFactory() {
-    return isMac() ? new MacOSActionsFactory() : new GenericActionsFactory();
+  @Named(AUXILIARY)
+  public TestGitHubRepository getTestGitHubRepository(
+      @Named("github.auxiliary.username") String gitHubAuxiliaryUsername,
+      @Named("github.auxiliary.password") String gitHubAuxiliaryPassword)
+      throws IOException, InterruptedException {
+    return new TestGitHubRepository(gitHubAuxiliaryUsername, gitHubAuxiliaryPassword);
   }
 }

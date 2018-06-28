@@ -10,60 +10,71 @@
  */
 package org.eclipse.che.selenium.dashboard;
 
-import static org.eclipse.che.selenium.core.constant.TestStacksConstants.JAVA;
+import static org.eclipse.che.commons.lang.NameGenerator.generate;
 import static org.eclipse.che.selenium.core.constant.TestTimeoutsConstants.ELEMENT_TIMEOUT_SEC;
 import static org.eclipse.che.selenium.pageobject.ProjectExplorer.FolderTypes.PROJECT_FOLDER;
+import static org.eclipse.che.selenium.pageobject.dashboard.NewWorkspace.Stack.JAVA;
 import static org.eclipse.che.selenium.pageobject.dashboard.ProjectSourcePage.Sources.GITHUB;
 import static org.testng.Assert.fail;
 import static org.testng.AssertJUnit.assertTrue;
 
 import com.google.inject.Inject;
 import com.google.inject.name.Named;
-import org.eclipse.che.commons.lang.NameGenerator;
+import java.io.IOException;
+import java.nio.file.Path;
+import java.nio.file.Paths;
 import org.eclipse.che.selenium.core.SeleniumWebDriver;
 import org.eclipse.che.selenium.core.TestGroup;
+import org.eclipse.che.selenium.core.client.TestGitHubRepository;
 import org.eclipse.che.selenium.core.client.TestWorkspaceServiceClient;
-import org.eclipse.che.selenium.core.user.TestUser;
+import org.eclipse.che.selenium.core.user.DefaultTestUser;
+import org.eclipse.che.selenium.core.webdriver.SeleniumWebDriverHelper;
 import org.eclipse.che.selenium.pageobject.Ide;
 import org.eclipse.che.selenium.pageobject.ProjectExplorer;
+import org.eclipse.che.selenium.pageobject.ToastLoader;
 import org.eclipse.che.selenium.pageobject.dashboard.Dashboard;
 import org.eclipse.che.selenium.pageobject.dashboard.NewWorkspace;
 import org.eclipse.che.selenium.pageobject.dashboard.ProjectSourcePage;
 import org.eclipse.che.selenium.pageobject.dashboard.workspaces.Workspaces;
-import org.openqa.selenium.TimeoutException;
+import org.openqa.selenium.WebDriverException;
 import org.testng.annotations.AfterClass;
 import org.testng.annotations.BeforeClass;
 import org.testng.annotations.Test;
 
-@Test(groups = TestGroup.GITHUB)
+@Test(groups = {TestGroup.GITHUB, TestGroup.OSIO})
 public class ImportProjectFromGitHubTest {
-  private static final String WORKSPACE = NameGenerator.generate("ImtMvnPrjGitHub", 4);
-  private static final String GITHUB_PROJECT_NAME = "AngularJS";
+  private static final String WORKSPACE =
+      generate(ImportProjectFromGitHubTest.class.getSimpleName(), 4);
 
   private String projectName;
+  private String testRepoName;
   private String ideWin;
 
-  @Inject(optional = true)
+  @Inject
   @Named("github.username")
   private String gitHubUsername;
 
-  @Inject(optional = true)
+  @Inject
   @Named("github.password")
   private String gitHubPassword;
 
   @Inject private Ide ide;
   @Inject private Dashboard dashboard;
   @Inject private Workspaces workspaces;
-  @Inject private TestUser defaultTestUser;
+  @Inject private DefaultTestUser defaultTestUser;
   @Inject private ProjectExplorer projectExplorer;
   @Inject private NewWorkspace newWorkspace;
+  @Inject private ToastLoader toastLoader;
   @Inject private ProjectSourcePage projectSourcePage;
   @Inject private SeleniumWebDriver seleniumWebDriver;
+  @Inject private SeleniumWebDriverHelper seleniumWebDriverHelper;
   @Inject private TestWorkspaceServiceClient workspaceServiceClient;
+  @Inject private TestGitHubRepository testRepo;
 
   @BeforeClass
-  public void setUp() {
-    projectName = gitHubUsername + "-" + GITHUB_PROJECT_NAME;
+  public void setUp() throws IOException {
+    Path entryPath = Paths.get(getClass().getResource("/projects/testRepo").getPath());
+    testRepo.addContent(entryPath);
 
     dashboard.open();
   }
@@ -75,13 +86,18 @@ public class ImportProjectFromGitHubTest {
 
   @Test
   public void checkAbilityImportProjectFromGithub() throws Exception {
+    testRepoName = testRepo.getName();
+    projectName = String.format("%s-%s", gitHubUsername, testRepoName);
+
     ideWin = seleniumWebDriver.getWindowHandle();
 
     dashboard.waitDashboardToolbarTitle();
     dashboard.selectWorkspacesItemOnDashboard();
     workspaces.clickOnAddWorkspaceBtn();
     newWorkspace.waitToolbar();
-    newWorkspace.selectStack(JAVA.getId());
+    // we are selecting 'Java' stack from the 'All Stack' tab for compatibility with OSIO
+    newWorkspace.clickOnAllStacksTab();
+    newWorkspace.selectStack(JAVA);
     newWorkspace.typeWorkspaceName(WORKSPACE);
 
     projectSourcePage.clickOnAddOrImportProjectButton();
@@ -92,12 +108,12 @@ public class ImportProjectFromGitHubTest {
     }
 
     assertTrue(projectSourcePage.isGithubProjectsListDisplayed());
-    projectSourcePage.selectProjectFromList(GITHUB_PROJECT_NAME);
+    projectSourcePage.selectProjectFromList(testRepoName);
     projectSourcePage.clickOnAddProjectButton();
     newWorkspace.clickOnCreateButtonAndOpenInIDE();
 
-    seleniumWebDriver.switchFromDashboardIframeToIde(ELEMENT_TIMEOUT_SEC);
-
+    seleniumWebDriverHelper.switchToIdeFrameAndWaitAvailability(ELEMENT_TIMEOUT_SEC);
+    toastLoader.waitToastLoaderAndClickStartButton();
     ide.waitOpenedWorkspaceIsReadyToUse();
     projectExplorer.waitItem(projectName);
     projectExplorer.waitDefinedTypeOfFolder(projectName, PROJECT_FOLDER);
@@ -105,23 +121,24 @@ public class ImportProjectFromGitHubTest {
 
   private void connectGithubAccount() {
     projectSourcePage.clickOnConnectGithubAccountButton();
-    seleniumWebDriver.switchToNoneCurrentWindow(ideWin);
+    seleniumWebDriverHelper.switchToNextWindow(ideWin);
 
-    try {
-      projectSourcePage.waitAuthorizationPageOpened();
-    } catch (TimeoutException ex) {
-      // Remove try-catch block after issue has been resolved
-      fail("Known issue https://github.com/eclipse/che/issues/8250");
-    }
-
+    projectSourcePage.waitAuthorizationPageOpened();
     projectSourcePage.typeLogin(gitHubUsername);
     projectSourcePage.typePassword(gitHubPassword);
     projectSourcePage.clickOnSignInButton();
     seleniumWebDriver.switchTo().window(ideWin);
 
     if (!projectSourcePage.isGithubProjectsListDisplayed()) {
-      seleniumWebDriver.switchToNoneCurrentWindow(ideWin);
-      projectSourcePage.waitAuthorizeBtn();
+      seleniumWebDriverHelper.switchToNextWindow(ideWin);
+
+      try {
+        projectSourcePage.waitAuthorizeBtn();
+      } catch (WebDriverException ex) {
+        // remove try-catch block after issue has been resolved
+        fail("Known issue https://github.com/redhat-developer/rh-che/issues/621", ex);
+      }
+
       projectSourcePage.clickOnAuthorizeBtn();
       seleniumWebDriver.switchTo().window(ideWin);
     }

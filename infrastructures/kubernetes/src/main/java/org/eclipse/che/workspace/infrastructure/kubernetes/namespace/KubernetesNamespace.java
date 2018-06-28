@@ -15,6 +15,7 @@ import io.fabric8.kubernetes.api.model.DoneableServiceAccount;
 import io.fabric8.kubernetes.api.model.Namespace;
 import io.fabric8.kubernetes.api.model.PersistentVolumeClaim;
 import io.fabric8.kubernetes.api.model.Pod;
+import io.fabric8.kubernetes.api.model.Secret;
 import io.fabric8.kubernetes.api.model.Service;
 import io.fabric8.kubernetes.api.model.ServiceAccount;
 import io.fabric8.kubernetes.api.model.extensions.Ingress;
@@ -55,48 +56,69 @@ public class KubernetesNamespace {
   private static final String DEFAULT_SERVICE_ACCOUNT_NAME = "default";
 
   private final String workspaceId;
+  private final String name;
 
   private final KubernetesPods pods;
   private final KubernetesServices services;
   private final KubernetesPersistentVolumeClaims pvcs;
   private final KubernetesIngresses ingresses;
+  private final KubernetesClientFactory clientFactory;
+  private final KubernetesSecrets secrets;
 
   @VisibleForTesting
   protected KubernetesNamespace(
+      KubernetesClientFactory clientFactory,
       String workspaceId,
+      String name,
       KubernetesPods pods,
       KubernetesServices services,
       KubernetesPersistentVolumeClaims pvcs,
-      KubernetesIngresses kubernetesIngresses) {
+      KubernetesIngresses kubernetesIngresses,
+      KubernetesSecrets secrets) {
+    this.clientFactory = clientFactory;
     this.workspaceId = workspaceId;
+    this.name = name;
     this.pods = pods;
     this.services = services;
     this.pvcs = pvcs;
     this.ingresses = kubernetesIngresses;
+    this.secrets = secrets;
   }
 
-  public KubernetesNamespace(KubernetesClientFactory clientFactory, String name, String workspaceId)
-      throws InfrastructureException {
-    this(clientFactory, name, workspaceId, true);
-  }
-
-  protected KubernetesNamespace(
-      KubernetesClientFactory clientFactory, String name, String workspaceId, boolean doPrepare)
-      throws InfrastructureException {
+  public KubernetesNamespace(
+      KubernetesClientFactory clientFactory, String name, String workspaceId) {
+    this.clientFactory = clientFactory;
     this.workspaceId = workspaceId;
+    this.name = name;
     this.pods = new KubernetesPods(name, workspaceId, clientFactory);
     this.services = new KubernetesServices(name, workspaceId, clientFactory);
     this.pvcs = new KubernetesPersistentVolumeClaims(name, workspaceId, clientFactory);
     this.ingresses = new KubernetesIngresses(name, workspaceId, clientFactory);
-    if (doPrepare) {
-      doPrepare(name, clientFactory.create(workspaceId));
-    }
+    this.secrets = new KubernetesSecrets(name, workspaceId, clientFactory);
   }
 
-  private void doPrepare(String name, KubernetesClient client) throws InfrastructureException {
+  /**
+   * Prepare namespace for using.
+   *
+   * <p>Preparing includes creating if needed and waiting for default service account.
+   *
+   * @throws InfrastructureException if any exception occurs during namespace preparing
+   */
+  void prepare() throws InfrastructureException {
+    KubernetesClient client = clientFactory.create(workspaceId);
     if (get(name, client) == null) {
       create(name, client);
     }
+  }
+
+  /** Returns namespace name */
+  public String getName() {
+    return name;
+  }
+
+  /** Returns identifier of the workspace for which current namespace is used */
+  public String getWorkspaceId() {
+    return workspaceId;
   }
 
   /** Returns object for managing {@link Pod} instances inside namespace. */
@@ -119,9 +141,14 @@ public class KubernetesNamespace {
     return ingresses;
   }
 
+  /** Returns object for managing {@link Secret} instances inside namespace. */
+  public KubernetesSecrets secrets() {
+    return secrets;
+  }
+
   /** Removes all object except persistent volume claims inside namespace. */
   public void cleanUp() throws InfrastructureException {
-    doRemove(ingresses::delete, services::delete, pods::delete);
+    doRemove(ingresses::delete, services::delete, pods::delete, secrets::delete);
   }
 
   /**

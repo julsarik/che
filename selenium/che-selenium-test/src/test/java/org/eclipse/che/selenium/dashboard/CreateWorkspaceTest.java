@@ -10,11 +10,9 @@
  */
 package org.eclipse.che.selenium.dashboard;
 
-import static org.eclipse.che.selenium.core.constant.TestStacksConstants.DOTNET;
-import static org.eclipse.che.selenium.core.constant.TestStacksConstants.ECLIPSE_CHE;
-import static org.eclipse.che.selenium.core.constant.TestStacksConstants.JAVA;
-import static org.eclipse.che.selenium.core.constant.TestStacksConstants.JAVA_MYSQL;
-import static org.eclipse.che.selenium.core.constant.TestStacksConstants.PHP;
+import static org.eclipse.che.selenium.pageobject.dashboard.NewWorkspace.Stack.BLANK;
+import static org.eclipse.che.selenium.pageobject.dashboard.NewWorkspace.Stack.JAVA;
+import static org.eclipse.che.selenium.pageobject.dashboard.NewWorkspace.Stack.JAVA_MYSQL;
 import static org.eclipse.che.selenium.pageobject.dashboard.ProjectSourcePage.Template.WEB_JAVA_SPRING;
 import static org.testng.Assert.assertEquals;
 import static org.testng.Assert.assertFalse;
@@ -22,6 +20,7 @@ import static org.testng.Assert.assertTrue;
 
 import com.google.inject.Inject;
 import org.eclipse.che.commons.lang.NameGenerator;
+import org.eclipse.che.selenium.core.TestGroup;
 import org.eclipse.che.selenium.pageobject.dashboard.Dashboard;
 import org.eclipse.che.selenium.pageobject.dashboard.NewWorkspace;
 import org.eclipse.che.selenium.pageobject.dashboard.ProjectSourcePage;
@@ -31,6 +30,7 @@ import org.testng.annotations.BeforeMethod;
 import org.testng.annotations.Test;
 
 /** @author Serhii Skoryk */
+@Test(groups = TestGroup.OSIO)
 public class CreateWorkspaceTest {
 
   private final String WORKSPACE_NAME = NameGenerator.generate("workspace", 4);
@@ -69,20 +69,23 @@ public class CreateWorkspaceTest {
   @Test
   public void checkWorkspaceName() {
     newWorkspace.typeWorkspaceName(TOO_SHORT_WORKSPACE_NAME);
-    assertTrue(newWorkspace.isWorkspaceNameErrorMessageEquals(WS_NAME_TOO_SHORT));
-    assertFalse(newWorkspace.isCreateWorkspaceButtonEnabled());
+    newWorkspace.waitErrorMessage(WS_NAME_TOO_SHORT);
+
+    newWorkspace.waitBottomCreateWorkspaceButtonDisabled();
 
     newWorkspace.typeWorkspaceName(TOO_LONG_WORKSPACE_NAME);
-    assertTrue(newWorkspace.isWorkspaceNameErrorMessageEquals(WS_NAME_TOO_LONG));
-    assertFalse(newWorkspace.isCreateWorkspaceButtonEnabled());
+    newWorkspace.waitErrorMessage(WS_NAME_TOO_LONG);
+    newWorkspace.waitBottomCreateWorkspaceButtonDisabled();
 
     // type valid names and check that the Create button is enabled
     newWorkspace.typeWorkspaceName(MIN_VALID_WORKSPACE_NAME);
-    assertTrue(newWorkspace.isCreateWorkspaceButtonEnabled());
+    newWorkspace.waitBottomCreateWorkspaceButtonEnabled();
+
     newWorkspace.typeWorkspaceName(WORKSPACE_NAME);
-    assertTrue(newWorkspace.isCreateWorkspaceButtonEnabled());
+    newWorkspace.waitBottomCreateWorkspaceButtonEnabled();
+
     newWorkspace.typeWorkspaceName(MAX_VALID_WORKSPACE_NAME);
-    assertTrue(newWorkspace.isCreateWorkspaceButtonEnabled());
+    newWorkspace.waitBottomCreateWorkspaceButtonEnabled();
   }
 
   @Test
@@ -91,7 +94,7 @@ public class CreateWorkspaceTest {
 
     // change the RAM number by the increment and decrement buttons
     newWorkspace.clickOnAllStacksTab();
-    newWorkspace.selectStack(JAVA.getId());
+    newWorkspace.selectStack(JAVA);
     assertTrue(newWorkspace.isMachineExists(machineName));
     assertEquals(newWorkspace.getRAM(machineName), 2.0);
     newWorkspace.clickOnIncrementMemoryButton(machineName);
@@ -106,7 +109,7 @@ public class CreateWorkspaceTest {
     assertEquals(newWorkspace.getRAM(machineName), 5.0);
 
     // check the RAM section of the Java-MySql stack(with two machines)
-    newWorkspace.selectStack(JAVA_MYSQL.getId());
+    newWorkspace.selectStack(JAVA_MYSQL);
     assertTrue(newWorkspace.isMachineExists("db"));
     assertTrue(newWorkspace.isMachineExists(machineName));
     newWorkspace.clickOnDecrementMemoryButton(machineName);
@@ -127,29 +130,29 @@ public class CreateWorkspaceTest {
     newWorkspace.clickOnAllStacksTab();
     newWorkspace.clickOnFiltersButton();
     newWorkspace.typeToFiltersInput("java");
-    newWorkspace.selectFilterSuggestion("JAVA");
-    assertTrue(newWorkspace.isStackVisible(JAVA.getId()));
-    assertFalse(newWorkspace.isStackVisible(JAVA_MYSQL.getId()));
+    newWorkspace.chooseFilterSuggestionByPlusButton("JAVA");
+    assertTrue(newWorkspace.isStackVisible(JAVA));
+    assertFalse(newWorkspace.isStackVisible(JAVA_MYSQL));
     newWorkspace.clickOnMultiMachineTab();
-    assertFalse(newWorkspace.isStackVisible(JAVA.getId()));
+    assertFalse(newWorkspace.isStackVisible(JAVA));
 
-    // filter stacks by 'php' value and check filtered stacks list
+    // filter stacks by 'blank' value and check filtered stacks list
     newWorkspace.clickOnSingleMachineTab();
     newWorkspace.clickOnFiltersButton();
     newWorkspace.clearSuggestions();
-    newWorkspace.typeToFiltersInput("php");
-    newWorkspace.selectFilterSuggestion("PHP");
-    assertTrue(newWorkspace.isStackVisible(PHP.getId()));
+    newWorkspace.typeToFiltersInput("blank");
+    newWorkspace.chooseFilterSuggestionByPlusButton("BLANK");
+    assertTrue(newWorkspace.isStackVisible(BLANK));
 
     // filter the Java-MySql stack
     newWorkspace.clickOnAllStacksTab();
     newWorkspace.clickOnFiltersButton();
     newWorkspace.clearSuggestions();
     newWorkspace.typeToFiltersInput("java 1");
-    newWorkspace.selectFilterSuggestion("JAVA 1.8, TOMCAT 8, MYSQL 5.7");
-    assertTrue(newWorkspace.isStackVisible(JAVA_MYSQL.getId()));
+    newWorkspace.chooseFilterSuggestionByPlusButton("JAVA 1.8, TOMCAT 8, MYSQL 5.7");
+    assertTrue(newWorkspace.isStackVisible(JAVA_MYSQL));
     newWorkspace.clickOnSingleMachineTab();
-    assertFalse(newWorkspace.isStackVisible(JAVA_MYSQL.getId()));
+    assertFalse(newWorkspace.isStackVisible(JAVA_MYSQL));
 
     newWorkspace.clickOnFiltersButton();
     newWorkspace.clearSuggestions();
@@ -161,47 +164,34 @@ public class CreateWorkspaceTest {
     // search stacks with 'java' value
     newWorkspace.typeToSearchInput("java");
     newWorkspace.clickOnSingleMachineTab();
-    assertTrue(newWorkspace.isStackVisible(JAVA.getId()));
-    assertTrue(newWorkspace.isStackVisible(ECLIPSE_CHE.getId()));
-    assertFalse(newWorkspace.isStackVisible(JAVA_MYSQL.getId()));
+    assertTrue(newWorkspace.isStackVisible(JAVA));
+    assertFalse(newWorkspace.isStackVisible(JAVA_MYSQL));
     newWorkspace.clickOnAllStacksTab();
-    assertTrue(newWorkspace.isStackVisible(JAVA_MYSQL.getId()));
-    newWorkspace.clearTextInSearchInput();
-
-    // search stacks with 'php' value
-    newWorkspace.typeToSearchInput("php");
-    newWorkspace.clickOnQuickStartTab();
-    assertTrue(newWorkspace.isStackVisible(PHP.getId()));
-    assertFalse(newWorkspace.isStackVisible("php-gae"));
-    newWorkspace.clickOnAllStacksTab();
-    assertTrue(newWorkspace.isStackVisible(PHP.getId()));
-    assertTrue(newWorkspace.isStackVisible("php-gae"));
+    assertTrue(newWorkspace.isStackVisible(JAVA_MYSQL));
     newWorkspace.clearTextInSearchInput();
 
     // search stacks with 'mysql' value
     newWorkspace.typeToSearchInput("mysql");
     newWorkspace.clickOnMultiMachineTab();
-    assertTrue(newWorkspace.isStackVisible(JAVA_MYSQL.getId()));
-    assertFalse(newWorkspace.isStackVisible(PHP.getId()));
+    assertTrue(newWorkspace.isStackVisible(JAVA_MYSQL));
     newWorkspace.clickOnAllStacksTab();
-    assertTrue(newWorkspace.isStackVisible(JAVA_MYSQL.getId()));
-    assertTrue(newWorkspace.isStackVisible(PHP.getId()));
+    assertTrue(newWorkspace.isStackVisible(JAVA_MYSQL));
 
-    // search stacks with 'net' value
-    newWorkspace.typeToSearchInput("net");
-    assertTrue(newWorkspace.isStackVisible(DOTNET.getId()));
+    // search stacks with 'blank' value
+    newWorkspace.typeToSearchInput("blank");
+    assertTrue(newWorkspace.isStackVisible(BLANK));
     newWorkspace.clickOnMultiMachineTab();
-    assertFalse(newWorkspace.isStackVisible(DOTNET.getId()));
+    assertFalse(newWorkspace.isStackVisible(BLANK));
 
     newWorkspace.clearTextInSearchInput();
   }
 
   @Test
   public void checkProjectSourcePage() {
-    newWorkspace.clickOnQuickStartTab();
+    newWorkspace.clickOnAllStacksTab();
 
     // add a project from the 'web-java-spring' sample
-    newWorkspace.selectStack(JAVA.getId());
+    newWorkspace.selectStack(JAVA);
     projectSourcePage.clickOnAddOrImportProjectButton();
     projectSourcePage.selectSample(projectName);
     projectSourcePage.clickOnAddProjectButton();

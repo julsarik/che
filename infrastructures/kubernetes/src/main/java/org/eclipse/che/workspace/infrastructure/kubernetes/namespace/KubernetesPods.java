@@ -10,10 +10,16 @@
  */
 package org.eclipse.che.workspace.infrastructure.kubernetes.namespace;
 
+import static java.nio.charset.StandardCharsets.UTF_8;
 import static java.util.concurrent.CompletableFuture.allOf;
 import static org.eclipse.che.workspace.infrastructure.kubernetes.Constants.CHE_WORKSPACE_ID_LABEL;
+import static org.eclipse.che.workspace.infrastructure.kubernetes.Constants.POD_STATUS_PHASE_FAILED;
+import static org.eclipse.che.workspace.infrastructure.kubernetes.Constants.POD_STATUS_PHASE_RUNNING;
+import static org.eclipse.che.workspace.infrastructure.kubernetes.Constants.POD_STATUS_PHASE_SUCCEEDED;
 import static org.eclipse.che.workspace.infrastructure.kubernetes.namespace.KubernetesObjectUtil.putLabel;
 
+import com.google.common.annotations.VisibleForTesting;
+import com.google.common.base.Strings;
 import io.fabric8.kubernetes.api.model.DoneablePod;
 import io.fabric8.kubernetes.api.model.Event;
 import io.fabric8.kubernetes.api.model.ObjectReference;
@@ -24,27 +30,33 @@ import io.fabric8.kubernetes.client.Watcher;
 import io.fabric8.kubernetes.client.dsl.ExecListener;
 import io.fabric8.kubernetes.client.dsl.ExecWatch;
 import io.fabric8.kubernetes.client.dsl.PodResource;
+import java.io.ByteArrayOutputStream;
 import java.io.UnsupportedEncodingException;
 import java.net.URLEncoder;
+import java.text.ParseException;
 import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Date;
 import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentLinkedQueue;
-import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.function.BiConsumer;
 import java.util.function.Predicate;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import java.util.stream.Collectors;
 import okhttp3.Response;
 import org.eclipse.che.api.workspace.server.spi.InfrastructureException;
 import org.eclipse.che.workspace.infrastructure.kubernetes.KubernetesClientFactory;
 import org.eclipse.che.workspace.infrastructure.kubernetes.KubernetesInfrastructureException;
-import org.eclipse.che.workspace.infrastructure.kubernetes.namespace.event.ContainerEvent;
-import org.eclipse.che.workspace.infrastructure.kubernetes.namespace.event.ContainerEventHandler;
 import org.eclipse.che.workspace.infrastructure.kubernetes.namespace.event.PodActionHandler;
+import org.eclipse.che.workspace.infrastructure.kubernetes.namespace.event.PodEvent;
+import org.eclipse.che.workspace.infrastructure.kubernetes.namespace.event.PodEventHandler;
+import org.eclipse.che.workspace.infrastructure.kubernetes.util.PodEvents;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -69,14 +81,19 @@ public class KubernetesPods {
   public static final int POD_REMOVAL_TIMEOUT_MIN = 5;
 
   private static final String POD_OBJECT_KIND = "Pod";
+  // error stream data initial capacity
+  public static final int ERROR_BUFF_INITIAL_CAP = 2048;
+  public static final String STDOUT = "stdout";
+  public static final String STDERR = "stderr";
 
   private final String namespace;
   private final KubernetesClientFactory clientFactory;
   private final ConcurrentLinkedQueue<PodActionHandler> podActionHandlers;
-  private final ConcurrentLinkedQueue<ContainerEventHandler> containerEventsHandlers;
+  private final ConcurrentLinkedQueue<PodEventHandler> containerEventsHandlers;
   private final String workspaceId;
   private Watch podWatch;
   private Watch containerWatch;
+  private Date watcherInitializationDate;
 
   KubernetesPods(String namespace, String workspaceId, KubernetesClientFactory clientFactory) {
     this.namespace = namespace;
@@ -200,23 +217,26 @@ public class KubernetesPods {
   }
 
   /**
-   * Subscribes to pod events and returns the resulting future, which ends when a pod event that
-   * satisfies the predicate is received.
+   * Subscribes to pod events and returns the resulting future, which completes when pod becomes
+   * running.
    *
    * <p>Note that the resulting future must be explicitly cancelled when its completion no longer
    * important because of finalization allocated resources.
    *
    * @param name the pod name that should be watched
-   * @param predicate a function that performs pod state check
    * @return completable future that is completed when one of the following conditions is met:
    *     <ul>
-   *       <li>an event that satisfies predicate is received
-   *       <li>exception while getting pod resource occurred
-   *       <li>connection problem occurred
+   *       <li>complete successfully in case of "Running" pod state.
+   *       <li>complete exceptionally in case of "Failed" pod state. Exception will contain pod
+   *           status reason value, or if absent, it will attempt to retrieve pod logs.
+   *       <li>complete exceptionally in case of "Succeeded" pod state. (workspace container has
+   *           been terminated).
+   *       <li>complete exceptionally when exception while getting pod resource occurred.
+   *       <li>complete exceptionally when connection problem occurred.
    *     </ul>
    *     otherwise, it must be explicitly closed
    */
-  public CompletableFuture<Void> waitAsync(String name, Predicate<Pod> predicate) {
+  public CompletableFuture<Void> waitRunningAsync(String name) {
     final CompletableFuture<Void> podRunningFuture = new CompletableFuture<>();
     try {
       final PodResource<Pod, DoneablePod> podResource =
@@ -226,9 +246,7 @@ public class KubernetesPods {
               new Watcher<Pod>() {
                 @Override
                 public void eventReceived(Action action, Pod pod) {
-                  if (predicate.test(pod)) {
-                    podRunningFuture.complete(null);
-                  }
+                  handleStartingPodStatus(podRunningFuture, pod);
                 }
 
                 @Override
@@ -244,14 +262,51 @@ public class KubernetesPods {
       if (pod == null) {
         podRunningFuture.completeExceptionally(
             new InfrastructureException("Specified pod " + name + " doesn't exist"));
-      }
-      if (predicate.test(pod)) {
-        podRunningFuture.complete(null);
+      } else {
+        handleStartingPodStatus(podRunningFuture, pod);
       }
     } catch (KubernetesClientException | InfrastructureException ex) {
       podRunningFuture.completeExceptionally(ex);
     }
     return podRunningFuture;
+  }
+
+  private void handleStartingPodStatus(CompletableFuture<Void> podRunningFuture, Pod pod) {
+    if (POD_STATUS_PHASE_RUNNING.equals(pod.getStatus().getPhase())) {
+      podRunningFuture.complete(null);
+      return;
+    }
+
+    if (POD_STATUS_PHASE_SUCCEEDED.equals(pod.getStatus().getPhase())) {
+      podRunningFuture.completeExceptionally(
+          new InfrastructureException(
+              "Pod container has been terminated. Container must be configured to use a non-terminating command."));
+      return;
+    }
+
+    if (POD_STATUS_PHASE_FAILED.equals(pod.getStatus().getPhase())) {
+      String exceptionMessage = "Pod '" + pod.getMetadata().getName() + "' failed to start.";
+      String reason = pod.getStatus().getReason();
+      if (Strings.isNullOrEmpty(reason)) {
+        try {
+          String podLog =
+              clientFactory
+                  .create()
+                  .pods()
+                  .inNamespace(namespace)
+                  .withName(pod.getMetadata().getName())
+                  .getLog();
+          exceptionMessage = exceptionMessage.concat(" Pod logs: ").concat(podLog);
+
+        } catch (InfrastructureException e) {
+          exceptionMessage = exceptionMessage.concat(" Error occurred while fetching pod logs.");
+        }
+      } else {
+        exceptionMessage = exceptionMessage.concat(" Reason: ").concat(reason);
+      }
+      podRunningFuture.completeExceptionally(new InfrastructureException(exceptionMessage));
+      LOG.warn(exceptionMessage);
+    }
   }
 
   /**
@@ -295,38 +350,70 @@ public class KubernetesPods {
    * @param handler pod container events handler
    * @throws InfrastructureException if any error occurs while watcher starting
    */
-  public void watchContainers(ContainerEventHandler handler) throws InfrastructureException {
+  public void watchEvents(PodEventHandler handler) throws InfrastructureException {
     if (containerWatch == null) {
       final Watcher<Event> watcher =
           new Watcher<Event>() {
             @Override
             public void eventReceived(Action action, Event event) {
               ObjectReference involvedObject = event.getInvolvedObject();
-              String fieldPath = involvedObject.getFieldPath();
 
-              // check that event related to
-              if (POD_OBJECT_KIND.equals(involvedObject.getKind()) && fieldPath != null) {
-                Matcher containerFieldMatcher = CONTAINER_FIELD_PATH_PATTERN.matcher(fieldPath);
-                if (containerFieldMatcher.matches()) {
+              if (POD_OBJECT_KIND.equals(involvedObject.getKind())) {
 
-                  String podName = involvedObject.getName();
-                  String containerName = containerFieldMatcher.group(CONTAINER_NAME_GROUP);
+                String podName = involvedObject.getName();
 
-                  ContainerEvent containerEvent =
-                      new ContainerEvent(
-                          podName,
-                          containerName,
-                          event.getMessage(),
-                          event.getMetadata().getCreationTimestamp());
-                  containerEventsHandlers.forEach(h -> h.handle(containerEvent));
+                PodEvent podEvent =
+                    new PodEvent(
+                        podName,
+                        getContainerName(involvedObject.getFieldPath()),
+                        event.getReason(),
+                        event.getMessage(),
+                        event.getMetadata().getCreationTimestamp(),
+                        event.getLastTimestamp());
+
+                try {
+                  if (happenedAfterWatcherInitialization(podEvent)) {
+                    containerEventsHandlers.forEach(h -> h.handle(podEvent));
+                  }
+                } catch (ParseException e) {
+                  LOG.error("Failed to parse last timestamp of the event: {}", podEvent);
                 }
               }
             }
 
             @Override
             public void onClose(KubernetesClientException ignored) {}
+
+            /**
+             * Returns the container name if the event is related to container. When the event is
+             * related to container `fieldPath` field contain information in the following format:
+             * `spec.container{web}`, where `web` is container name
+             */
+            private String getContainerName(String fieldPath) {
+              String containerName = null;
+              if (fieldPath != null) {
+                Matcher containerFieldMatcher = CONTAINER_FIELD_PATH_PATTERN.matcher(fieldPath);
+                if (containerFieldMatcher.matches()) {
+                  containerName = containerFieldMatcher.group(CONTAINER_NAME_GROUP);
+                }
+              }
+              return containerName;
+            }
+
+            /**
+             * Returns true if 'lastTimestamp' of the event is *after* the time of the watcher
+             * initialization
+             */
+            private boolean happenedAfterWatcherInitialization(PodEvent event)
+                throws ParseException {
+              String eventLastTimestamp = event.getLastTimestamp();
+              Date eventLastTimestampDate =
+                  PodEvents.convertEventTimestampToDate(eventLastTimestamp);
+              return eventLastTimestampDate.after(watcherInitializationDate);
+            }
           };
       try {
+        watcherInitializationDate = new Date();
         containerWatch =
             clientFactory.create(workspaceId).events().inNamespace(namespace).watch(watcher);
       } catch (KubernetesClientException ex) {
@@ -337,7 +424,7 @@ public class KubernetesPods {
   }
 
   /** Stops watching the pods inside Kubernetes namespace. */
-  void stopWatch() {
+  public void stopWatch() {
     try {
       if (podWatch != null) {
         podWatch.close();
@@ -359,6 +446,57 @@ public class KubernetesPods {
           ex.getMessage());
     }
     containerEventsHandlers.clear();
+  }
+
+  /**
+   * Executes command in specified container.
+   *
+   * @param podName pod name where command will be executed
+   * @param containerName container name where command will be executed
+   * @param timeoutMin timeout to wait until process will be done
+   * @param command command to execute
+   * @param outputConsumer command output biconsumer, that is accepts stream type and message
+   * @throws InfrastructureException when specified timeout is reached
+   * @throws InfrastructureException when {@link Thread} is interrupted while command executing
+   * @throws InfrastructureException when command error stream is not empty
+   * @throws InfrastructureException when any other exception occurs
+   */
+  public void exec(
+      String podName,
+      String containerName,
+      int timeoutMin,
+      String[] command,
+      BiConsumer<String, String> outputConsumer)
+      throws InfrastructureException {
+    final ExecWatchdog watchdog = new ExecWatchdog();
+    final ByteArrayOutputStream errStream = new ByteArrayOutputStream(ERROR_BUFF_INITIAL_CAP);
+    try (ExecWatch watch =
+        clientFactory
+            .create(workspaceId)
+            .pods()
+            .inNamespace(namespace)
+            .withName(podName)
+            .inContainer(containerName)
+            .writingError(errStream)
+            .usingListener(watchdog)
+            .exec(encode(command))) {
+      try {
+        watchdog.wait(timeoutMin, TimeUnit.MINUTES);
+        final byte[] error = errStream.toByteArray();
+        if (error.length > 0) {
+          final String cmd = Arrays.stream(command).collect(Collectors.joining(" ", "", "\n"));
+          final String err = new String(error, UTF_8);
+          outputConsumer.accept(STDOUT, cmd);
+          outputConsumer.accept(STDERR, err);
+          throw new InfrastructureException(err);
+        }
+      } catch (InterruptedException ex) {
+        Thread.currentThread().interrupt();
+        throw new InfrastructureException(ex.getMessage(), ex);
+      }
+    } catch (KubernetesClientException ex) {
+      throw new KubernetesInfrastructureException(ex);
+    }
   }
 
   /**
@@ -467,14 +605,19 @@ public class KubernetesPods {
     }
   }
 
-  private CompletableFuture<Void> doDelete(String name) throws InfrastructureException {
+  @VisibleForTesting
+  CompletableFuture<Void> doDelete(String name) throws InfrastructureException {
+    Watch toCloseOnException = null;
     try {
       final PodResource<Pod, DoneablePod> podResource =
           clientFactory.create(workspaceId).pods().inNamespace(namespace).withName(name);
       final CompletableFuture<Void> deleteFuture = new CompletableFuture<>();
       final Watch watch = podResource.watch(new DeleteWatcher(deleteFuture));
-
-      podResource.delete();
+      toCloseOnException = watch;
+      Boolean deleteSucceeded = podResource.delete();
+      if (deleteSucceeded == null || !deleteSucceeded) {
+        deleteFuture.complete(null);
+      }
       return deleteFuture.whenComplete(
           (v, e) -> {
             if (e != null) {
@@ -483,7 +626,15 @@ public class KubernetesPods {
             watch.close();
           });
     } catch (KubernetesClientException ex) {
+      if (toCloseOnException != null) {
+        toCloseOnException.close();
+      }
       throw new KubernetesInfrastructureException(ex);
+    } catch (Exception e) {
+      if (toCloseOnException != null) {
+        toCloseOnException.close();
+      }
+      throw e;
     }
   }
 
@@ -525,10 +676,10 @@ public class KubernetesPods {
 
   private class ExecWatchdog implements ExecListener {
 
-    private final CountDownLatch latch;
+    private final CompletableFuture<Void> completionFuture;
 
     private ExecWatchdog() {
-      this.latch = new CountDownLatch(1);
+      this.completionFuture = new CompletableFuture<>();
     }
 
     @Override
@@ -536,18 +687,22 @@ public class KubernetesPods {
 
     @Override
     public void onFailure(Throwable t, Response response) {
-      latch.countDown();
+      completionFuture.completeExceptionally(t);
     }
 
     @Override
     public void onClose(int code, String reason) {
-      latch.countDown();
+      completionFuture.complete(null);
     }
 
     public void wait(long timeout, TimeUnit timeUnit)
         throws InterruptedException, InfrastructureException {
-      boolean isDone = latch.await(timeout, timeUnit);
-      if (!isDone) {
+      try {
+        completionFuture.get(timeout, timeUnit);
+      } catch (ExecutionException e) {
+        throw new InfrastructureException(
+            "Error occured while executing command in pod: " + e.getMessage(), e);
+      } catch (TimeoutException e) {
         throw new InfrastructureException("Timeout reached while execution of command");
       }
     }

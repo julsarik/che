@@ -10,29 +10,20 @@
  */
 package org.eclipse.che.api.languageserver;
 
-import static org.mockito.Mockito.any;
-import static org.mockito.Mockito.mock;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
-import static org.testng.Assert.assertTrue;
 
-import java.io.File;
+import com.google.common.collect.ImmutableSet;
 import java.nio.file.PathMatcher;
-import java.util.Collections;
-import java.util.function.Consumer;
-import org.eclipse.che.api.languageserver.launcher.LanguageServerLauncher;
-import org.eclipse.che.api.languageserver.registry.LanguageServerDescription;
-import org.eclipse.che.api.languageserver.registry.LanguageServerFileWatcher;
-import org.eclipse.che.api.languageserver.registry.ServerInitializer;
-import org.eclipse.che.api.languageserver.registry.ServerInitializerObserver;
+import org.eclipse.che.api.core.notification.EventService;
 import org.eclipse.che.api.watcher.server.FileWatcherManager;
 import org.eclipse.lsp4j.services.LanguageServer;
-import org.eclipse.lsp4j.services.WorkspaceService;
-import org.mockito.ArgumentCaptor;
-import org.mockito.Captor;
 import org.mockito.Mock;
 import org.mockito.testng.MockitoTestNGListener;
-import org.testng.annotations.AfterMethod;
+import org.testng.annotations.BeforeMethod;
 import org.testng.annotations.Listeners;
 import org.testng.annotations.Test;
 
@@ -40,74 +31,41 @@ import org.testng.annotations.Test;
 @Listeners(MockitoTestNGListener.class)
 public class LanguageServerFileWatcherTest {
 
-  @Mock private LanguageServerLauncher launcher;
-  @Mock private LanguageServer server;
+  private static final String ID = "id";
+
   @Mock private FileWatcherManager watcherManager;
-  @Mock private ServerInitializer initializer;
-  @Captor private ArgumentCaptor<Consumer<String>> changedCaptor;
 
-  private LanguageServerFileWatcher watcher;
+  private EventService eventService;
+  private RegistryContainer registryContainer;
 
-  @AfterMethod
-  public void tearDown() throws Exception {
-    if (watcher != null) {
-      watcher.removeAllWatchers();
-    }
+  @Mock private LanguageServer languageServer;
+  @Mock private LanguageServerInitializedEvent languageServerInitializedEvent;
+  @Mock private PathMatcher pathMatcher;
+
+  @BeforeMethod
+  public void setUp() {
+    registryContainer = new RegistryContainer();
+    eventService = new EventService();
+
+    new LanguageServerFileWatcher(watcherManager, eventService, registryContainer).subscribe();
+
+    when(languageServerInitializedEvent.getId()).thenReturn(ID);
+    when(languageServerInitializedEvent.getLanguageServer()).thenReturn(languageServer);
   }
 
   @Test
-  public void testShouldAddObserver() throws Exception {
-    watcher = new LanguageServerFileWatcher(watcherManager, initializer);
-    verify(initializer).addObserver(any());
+  public void shouldSubscribeForEvent() throws Exception {
+    eventService.publish(languageServerInitializedEvent);
+
+    verify(languageServerInitializedEvent, times(2)).getId();
+    verify(languageServerInitializedEvent).getLanguageServer();
   }
 
   @Test
-  public void testRegisterFileWatcher() throws Exception {
-    ArgumentCaptor<ServerInitializerObserver> argumentCaptor =
-        ArgumentCaptor.forClass(ServerInitializerObserver.class);
-    watcher = new LanguageServerFileWatcher(watcherManager, initializer);
-    verify(initializer).addObserver(argumentCaptor.capture());
-    ServerInitializerObserver value = argumentCaptor.getValue();
+  public void shouldRegisterOperationsForFileWatcher() {
+    registryContainer.pathMatcherRegistry.add(ID, ImmutableSet.of(pathMatcher));
+    eventService.publish(languageServerInitializedEvent);
 
-    LanguageServerDescription description =
-        new LanguageServerDescription(
-            "foo",
-            Collections.singletonList("bar"),
-            Collections.emptyList(),
-            Collections.singletonList("glob:*.foo"));
-    when(launcher.getDescription()).thenReturn(description);
-    value.onServerInitialized(launcher, server, null, null);
-
-    ArgumentCaptor<PathMatcher> pathMatcherCaptor = ArgumentCaptor.forClass(PathMatcher.class);
-    verify(watcherManager).registerByMatcher(pathMatcherCaptor.capture(), any(), any(), any());
-    assertTrue(pathMatcherCaptor.getValue().matches(new File("bar.foo").toPath()));
-  }
-
-  @Test
-  public void testSendNotification() throws Exception {
-    ArgumentCaptor<ServerInitializerObserver> argumentCaptor =
-        ArgumentCaptor.forClass(ServerInitializerObserver.class);
-    watcher = new LanguageServerFileWatcher(watcherManager, initializer);
-    verify(initializer).addObserver(argumentCaptor.capture());
-    ServerInitializerObserver value = argumentCaptor.getValue();
-
-    LanguageServerDescription description =
-        new LanguageServerDescription(
-            "foo",
-            Collections.singletonList("bar"),
-            Collections.emptyList(),
-            Collections.singletonList("glob:*.foo"));
-    when(launcher.getDescription()).thenReturn(description);
-
-    WorkspaceService workspaceService = mock(WorkspaceService.class);
-    when(server.getWorkspaceService()).thenReturn(workspaceService);
-
-    value.onServerInitialized(launcher, server, null, null);
-
-    verify(watcherManager).registerByMatcher(any(), any(), changedCaptor.capture(), any());
-
-    changedCaptor.getValue().accept("/p/bar.foo");
-
-    verify(workspaceService).didChangeWatchedFiles(any());
+    verify(watcherManager).registerByMatcher(eq(pathMatcher), any(), any(), any());
   }
 }

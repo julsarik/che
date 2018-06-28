@@ -11,6 +11,7 @@
 'use strict';
 import {CheJsonRpcApiClient} from './che-json-rpc-api-service';
 import {ICommunicationClient} from './json-rpc-client';
+import { isatty } from 'tty';
 
 enum MasterChannels {
   ENVIRONMENT_OUTPUT = <any>'machine/log',
@@ -36,12 +37,111 @@ const UNSUBSCRIBE: string = 'unsubscribe';
  * @author Ann Shumilova
  */
 export class CheJsonRpcMasterApi {
+  private $log: ng.ILogService;
+  private $timeout: ng.ITimeoutService;
+  private $interval: ng.IIntervalService;
+  private $q: ng.IQService;
   private cheJsonRpcApi: CheJsonRpcApiClient;
   private clientId: string;
+  private checkingInterval: ng.IPromise<any>;
+  private reconnectionAttemptTimeout: ng.IPromise<any>;
 
-  constructor (client: ICommunicationClient, entrypoint: string) {
+  private maxReconnectionAttempts = 100;
+  private reconnectionAttemptNumber = 0;
+  private reconnectionDelay = 30000;
+  private checkingDelay = 10000;
+  private fetchingClientIdTimeout = 5000;
+
+  constructor(client: ICommunicationClient,
+              entrypoint: string,
+              $log: ng.ILogService,
+              $timeout: ng.ITimeoutService,
+              $interval: ng.IIntervalService,
+              $q: ng.IQService) {
+    this.$log = $log;
+    this.$timeout = $timeout;
+    this.$interval = $interval;
+    this.$q = $q;
+
+    client.addListener('open', () => this.onConnectionOpen(entrypoint));
+    client.addListener('close', () => this.onConnectionClose(entrypoint));
+
     this.cheJsonRpcApi = new CheJsonRpcApiClient(client);
     this.connect(entrypoint);
+  }
+
+  onConnectionOpen(entrypoint: string): void {
+    if (this.reconnectionAttemptNumber !== 0) {
+      this.$log.log('WebSocket connection is opened.');
+    }
+    this.reconnectionAttemptNumber = 0;
+
+    if (this.checkingInterval) {
+      this.$interval.cancel(this.checkingInterval);
+    }
+    if (this.reconnectionAttemptTimeout) {
+      this.$timeout.cancel(this.reconnectionAttemptTimeout);
+      this.reconnectionAttemptTimeout = undefined;
+    }
+
+    this.checkingInterval = this.$interval(() => {
+      if (this.reconnectionAttemptTimeout) {
+        return;
+      }
+
+      let isAlive = false;
+      const fetchClientPromise = this.fetchClientId().then(() => {
+        isAlive = true;
+        return isAlive;
+      }, (error: any) => {
+        this.$log.error(error);
+        isAlive = false;
+        return isAlive;
+      });
+
+      // this is timeout of fetchClientId request
+      const fetchClientTimeout = this.$timeout(() => {
+        return isAlive;
+      }, this.fetchingClientIdTimeout);
+
+      this.promisesRace([fetchClientPromise, fetchClientTimeout]).then((isAlive: boolean) => {
+        if (isAlive) {
+          return;
+        }
+
+        this.reconnect(entrypoint);
+      });
+
+    }, this.checkingDelay);
+  }
+
+  onConnectionClose(entrypoint: string): void {
+    this.reconnect(entrypoint);
+  }
+
+  reconnect(entrypoint: string): void {
+    this.$log.warn('WebSocket connection is closed.');
+    if (this.reconnectionAttemptNumber === this.maxReconnectionAttempts) {
+      this.$log.warn('The maximum number of attempts to reconnect WebSocket has been reached.');
+
+      if (this.checkingInterval) {
+        this.$interval.cancel(this.checkingInterval);
+      }
+
+      return;
+    }
+
+    this.reconnectionAttemptNumber++;
+    // let very first reconnection happens immediately after the connection is closed.
+    const delay = this.reconnectionAttemptNumber === 1 ? 0 : this.reconnectionDelay;
+
+    if (delay) {
+      this.$log.warn(`WebSocket will be reconnected in ${delay} ms...`);
+    }
+    this.reconnectionAttemptTimeout = this.$timeout(() => {
+      this.$log.warn(`WebSocket is reconnecting, attempt #${this.reconnectionAttemptNumber} out of ${this.maxReconnectionAttempts}...`);
+      this.connect(entrypoint);
+    }, delay);
   }
 
   /**
@@ -51,6 +151,18 @@ export class CheJsonRpcMasterApi {
    * @returns {IPromise<IHttpPromiseCallbackArg<any>>}
    */
   connect(entrypoint: string): ng.IPromise<any> {
+    if (this.clientId) {
+      let clientId = `clientId=${this.clientId}`;
+      // in case of reconnection
+      // we need to test entrypoint on existing query parameters
+      // to add already gotten clientId
+      if (/\?/.test(entrypoint) === false) {
+        clientId = '?' + clientId;
+      } else {
+        clientId = '&' + clientId;
+      }
+      entrypoint += clientId;
+    }
     return this.cheJsonRpcApi.connect(entrypoint).then(() => {
       return this.fetchClientId();
     });
@@ -233,5 +345,15 @@ export class CheJsonRpcMasterApi {
     let params = {method: method, scope: {}};
     params.scope[masterScope] = id;
     this.cheJsonRpcApi.unsubscribe(UNSUBSCRIBE, method, callback, params);
+  }
+
+  private promisesRace(promises: ng.IPromise<any>[]): ng.IPromise<any> {
+    const deferred = this.$q.defer();
+
+    promises.forEach((promise: ng.IPromise<any>) => {
+      promise.then(deferred.resolve, deferred.reject);
+    });
+
+    return deferred.promise;
   }
 }

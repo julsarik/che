@@ -28,10 +28,10 @@ import org.eclipse.che.api.core.ConflictException;
 import org.eclipse.che.api.core.ForbiddenException;
 import org.eclipse.che.api.core.NotFoundException;
 import org.eclipse.che.api.core.ServerException;
+import org.eclipse.che.api.core.model.workspace.config.ProjectConfig;
 import org.eclipse.che.api.core.notification.EventService;
 import org.eclipse.che.api.core.notification.EventSubscriber;
 import org.eclipse.che.api.project.server.ProjectManager;
-import org.eclipse.che.api.project.server.impl.RegisteredProject;
 import org.eclipse.che.api.project.server.notification.ProjectDeletedEvent;
 import org.eclipse.che.ide.ext.java.shared.Constants;
 import org.eclipse.che.jdt.core.launching.JREContainerInitializer;
@@ -88,17 +88,15 @@ public class MavenWorkspace {
           @Override
           public void onEvent(ProjectDeletedEvent event) {
             IProject project = workspaceProvider.get().getRoot().getProject(event.getProjectPath());
-            manager.delete(Collections.singletonList(project));
+            manager.delete(
+                Collections.singletonList(project)); // check if project exists and remove if not
           }
         });
     manager.addListener(
         new MavenProjectListener() {
           @Override
           public void projectResolved(
-              MavenProject project, MavenProjectModifications modifications) {
-            //                communication.sendUpdateMassage(Collections.emptySet(),
-            // Collections.emptyList());
-          }
+              MavenProject project, MavenProjectModifications modifications) {}
 
           @Override
           public void projectUpdated(
@@ -162,9 +160,11 @@ public class MavenWorkspace {
     removed.forEach(
         project -> {
           try {
-            projectManagerProvider
-                .get()
-                .removeType(project.getProject().getFullPath().toOSString(), MAVEN_ID);
+            if (project.getProject().exists()) {
+              projectManagerProvider
+                  .get()
+                  .removeType(project.getProject().getFullPath().toOSString(), MAVEN_ID);
+            }
           } catch (ServerException
               | ForbiddenException
               | ConflictException
@@ -240,7 +240,7 @@ public class MavenWorkspace {
               "org.codehaus.mojo", "build-helper-maven-plugin", "add-test-source");
 
       IPath projectPath = project.getProject().getFullPath();
-      RegisteredProject registeredProject =
+      ProjectConfig registeredProject =
           projectManagerProvider
               .get()
               .get(projectPath.toOSString())

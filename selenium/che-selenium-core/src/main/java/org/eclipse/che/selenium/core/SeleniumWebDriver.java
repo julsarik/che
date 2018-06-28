@@ -11,20 +11,25 @@
 package org.eclipse.che.selenium.core;
 
 import static java.lang.String.format;
+import static org.eclipse.che.selenium.core.constant.TestTimeoutsConstants.APPLICATION_START_TIMEOUT_SEC;
 import static org.eclipse.che.selenium.core.constant.TestTimeoutsConstants.LOADER_TIMEOUT_SEC;
 import static org.eclipse.che.selenium.core.utils.WaitUtils.sleepQuietly;
+import static org.openqa.selenium.support.ui.ExpectedConditions.frameToBeAvailableAndSwitchToIt;
+import static org.openqa.selenium.support.ui.ExpectedConditions.visibilityOfElementLocated;
 
 import com.google.inject.Inject;
 import com.google.inject.Singleton;
+import com.google.inject.name.Named;
 import java.io.Closeable;
 import java.io.IOException;
 import java.net.MalformedURLException;
 import java.net.URL;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Scanner;
 import java.util.Set;
 import java.util.logging.Level;
-import javax.inject.Named;
 import org.eclipse.che.commons.annotation.Nullable;
 import org.eclipse.che.selenium.core.constant.TestBrowser;
 import org.openqa.selenium.By;
@@ -45,7 +50,6 @@ import org.openqa.selenium.remote.CapabilityType;
 import org.openqa.selenium.remote.DesiredCapabilities;
 import org.openqa.selenium.remote.RemoteWebDriver;
 import org.openqa.selenium.support.ui.ExpectedCondition;
-import org.openqa.selenium.support.ui.ExpectedConditions;
 import org.openqa.selenium.support.ui.WebDriverWait;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -65,7 +69,7 @@ public class SeleniumWebDriver
   private TestBrowser browser;
   private boolean gridMode;
   private String webDriverVersion;
-
+  private final String downloadDirectory;
   private final RemoteWebDriver driver;
 
   @Inject
@@ -73,10 +77,12 @@ public class SeleniumWebDriver
       @Named("sys.browser") TestBrowser browser,
       @Named("sys.driver.port") String webDriverPort,
       @Named("sys.grid.mode") boolean gridMode,
-      @Named("sys.driver.version") String webDriverVersion) {
+      @Named("sys.driver.version") String webDriverVersion,
+      @Named("tests.download_dir") String downloadDirectory) {
     this.browser = browser;
     this.gridMode = gridMode;
     this.webDriverVersion = webDriverVersion;
+    this.downloadDirectory = downloadDirectory;
 
     try {
       URL webDriverUrl =
@@ -177,51 +183,22 @@ public class SeleniumWebDriver
     return driver.getMouse();
   }
 
+  public String getSessionId() {
+    return driver.getSessionId().toString();
+  }
+
   private RemoteWebDriver createDriver(URL webDriverUrl) {
     for (int i = 1; ; ) {
       try {
         return doCreateDriver(webDriverUrl);
       } catch (WebDriverException e) {
         if (i++ >= MAX_ATTEMPTS) {
-          String tip = getWebDriverInitTip();
-          LOG.error(format("%s.%s", e.getMessage(), tip), e);
-          throw new RuntimeException(format("Web driver initialization failed.%s", tip), e);
+          throw e;
         }
       }
 
       sleepQuietly(DELAY_IN_SECONDS);
     }
-  }
-
-  private String getWebDriverInitTip() {
-    if (!gridMode && browser.equals(TestBrowser.GOOGLE_CHROME)) {
-      return getGoogleChromeTip();
-    }
-
-    return "";
-  }
-
-  private String getGoogleChromeTip() {
-    try {
-      URL webDriverNotes =
-          new URL(
-              String.format(
-                  "http://chromedriver.storage.googleapis.com/%s/notes.txt", webDriverVersion));
-      String supportedVersions = readSupportedVersionInfoForGoogleDriver(webDriverNotes);
-      if (supportedVersions != null) {
-        return format(
-            "%n(Tip: there is Chrome Driver v.%s used, and it requires local Google Chrome of v.%s)",
-            webDriverVersion, supportedVersions);
-      }
-    } catch (java.io.IOException e) {
-      LOG.warn(
-          "It's impossible to read info about versions of browser which Chrome Driver supports.",
-          e);
-    }
-
-    return format(
-        "%n(Tip: check manually if local Google Chrome browser supported by Chrome Driver v.%s at official site)",
-        webDriverVersion);
   }
 
   /**
@@ -262,9 +239,18 @@ public class SeleniumWebDriver
         options.addArguments("--no-sandbox");
         options.addArguments("--dns-prefetch-disable");
 
+        // set parameters required for automatic download capability
+        String downloadDirectory = "/tmp/";
+        Map<String, Object> chromePrefs = new HashMap<>();
+        chromePrefs.put("download.default_directory", downloadDirectory);
+        chromePrefs.put("download.prompt_for_download", false);
+        chromePrefs.put("plugins.plugins_disabled", "['Chrome PDF Viewer']");
+        options.setExperimentalOption("prefs", chromePrefs);
+
         capability = DesiredCapabilities.chrome();
         capability.setCapability(ChromeOptions.CAPABILITY, options);
         capability.setCapability(CapabilityType.LOGGING_PREFS, loggingPreferences);
+        capability.setCapability(CapabilityType.ACCEPT_SSL_CERTS, true);
         break;
 
       default:
@@ -274,6 +260,16 @@ public class SeleniumWebDriver
     }
 
     RemoteWebDriver driver = new RemoteWebDriver(webDriverUrl, capability);
+    if (driver.getErrorHandler().isIncludeServerErrors()
+        && driver.getCapabilities().getCapability("message") != null) {
+      String errorMessage =
+          format(
+              "Web driver creation error occurred: %s",
+              driver.getCapabilities().getCapability("message"));
+      LOG.error(errorMessage);
+      throw new RuntimeException(errorMessage);
+    }
+
     driver.manage().window().setSize(new Dimension(1920, 1080));
 
     return driver;
@@ -317,16 +313,25 @@ public class SeleniumWebDriver
   }
 
   public void switchFromDashboardIframeToIde() {
-    new WebDriverWait(this, LOADER_TIMEOUT_SEC * 6)
-        .until(ExpectedConditions.frameToBeAvailableAndSwitchToIt(By.id("ide-application-iframe")));
+    switchFromDashboardIframeToIde(APPLICATION_START_TIMEOUT_SEC);
   }
 
   public void switchFromDashboardIframeToIde(int timeout) {
-    new WebDriverWait(this, timeout)
-        .until(ExpectedConditions.frameToBeAvailableAndSwitchToIt(By.id("ide-application-iframe")));
+    wait(timeout).until(visibilityOfElementLocated(By.id("ide-application-iframe")));
+
+    wait(LOADER_TIMEOUT_SEC)
+        .until(
+            (ExpectedCondition<Boolean>)
+                driver ->
+                    (((JavascriptExecutor) driver)
+                            .executeScript("return angular.element('body').scope().showIDE"))
+                        .toString()
+                        .equals("true"));
+
+    wait(timeout).until(frameToBeAvailableAndSwitchToIt(By.id("ide-application-iframe")));
   }
 
-  public WebDriverWait wait(int timeOutInSeconds) {
+  private WebDriverWait wait(int timeOutInSeconds) {
     return new WebDriverWait(this, timeOutInSeconds);
   }
 }

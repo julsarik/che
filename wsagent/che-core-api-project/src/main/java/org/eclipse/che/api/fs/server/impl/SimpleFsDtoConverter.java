@@ -10,7 +10,6 @@
  */
 package org.eclipse.che.api.fs.server.impl;
 
-import static org.eclipse.che.api.fs.server.WsPathUtils.isRoot;
 import static org.eclipse.che.api.fs.server.WsPathUtils.nameOf;
 import static org.eclipse.che.dto.server.DtoFactory.newDto;
 
@@ -21,11 +20,11 @@ import java.util.Set;
 import javax.inject.Inject;
 import javax.inject.Singleton;
 import org.eclipse.che.api.core.NotFoundException;
+import org.eclipse.che.api.core.model.workspace.config.ProjectConfig;
 import org.eclipse.che.api.fs.server.FsDtoConverter;
 import org.eclipse.che.api.fs.server.FsManager;
 import org.eclipse.che.api.project.server.ProjectManager;
 import org.eclipse.che.api.project.server.impl.ProjectDtoConverter;
-import org.eclipse.che.api.project.server.impl.RegisteredProject;
 import org.eclipse.che.api.project.shared.dto.ItemReference;
 
 @Singleton
@@ -55,15 +54,7 @@ public class SimpleFsDtoConverter implements FsDtoConverter {
       length = null;
     }
 
-    RegisteredProject project;
-    if (isRoot(wsPath)) {
-      project = null;
-    } else {
-      project =
-          projectManager
-              .getClosest(wsPath)
-              .orElseThrow(() -> new NotFoundException("Can't find project for item " + wsPath));
-    }
+    ProjectConfig project = projectManager.getClosest(wsPath).orElse(null);
 
     String type;
     if (projectManager.isRegistered(wsPath)) {

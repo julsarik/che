@@ -12,18 +12,15 @@ package org.eclipse.che.plugin.java.plain.server.projecttype;
 
 import static java.util.Collections.singletonList;
 import static org.eclipse.che.ide.ext.java.shared.Constants.SOURCE_FOLDER;
-import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
-import static org.testng.Assert.assertEquals;
-import static org.testng.Assert.assertTrue;
 
 import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import org.eclipse.che.api.project.server.ProjectManager;
-import org.eclipse.che.api.project.server.impl.RegisteredProject;
+import org.eclipse.che.api.project.shared.RegisteredProject;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Captor;
 import org.mockito.InjectMocks;
@@ -50,27 +47,8 @@ public class PlainJavaValueProviderFactoryTest {
     when(registeredProject.getAttributes()).thenReturn(attributes);
     when(registeredProject.getPath()).thenReturn(PROJECT_PATH);
 
-    plainJavaValueProviderFactory
-        .newInstance(PROJECT_PATH)
-        .setValues(SOURCE_FOLDER, singletonList("src"));
+    registeredProject.getAttributes().put(SOURCE_FOLDER, Arrays.asList("src"));
 
     verify(attributes).put(SOURCE_FOLDER, singletonList("src"));
-  }
-
-  @Test
-  public void newValueOfAttributeShouldBeAdded() throws Exception {
-    when(projectManager.get(PROJECT_PATH)).thenReturn(Optional.of(registeredProject));
-    when(registeredProject.getAttributes()).thenReturn(attributes);
-    when(attributes.containsKey(SOURCE_FOLDER)).thenReturn(true);
-    when(attributes.get(SOURCE_FOLDER)).thenReturn(Arrays.asList("src1", "src2"));
-
-    plainJavaValueProviderFactory
-        .newInstance(PROJECT_PATH)
-        .setValues(SOURCE_FOLDER, singletonList("src3"));
-
-    verify(attributes).put(eq(SOURCE_FOLDER), captor.capture());
-
-    assertEquals(captor.getValue().size(), 3);
-    assertTrue(captor.getValue().containsAll(Arrays.asList("src1", "src2", "src3")));
   }
 }

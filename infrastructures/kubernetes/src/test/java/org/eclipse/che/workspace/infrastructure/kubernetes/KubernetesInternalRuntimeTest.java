@@ -29,10 +29,13 @@ import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyZeroInteractions;
 import static org.mockito.Mockito.when;
 import static org.testng.Assert.assertEquals;
+import static org.testng.Assert.assertFalse;
 import static org.testng.Assert.assertTrue;
 import static org.testng.Assert.fail;
 
@@ -47,6 +50,7 @@ import io.fabric8.kubernetes.api.model.IntOrStringBuilder;
 import io.fabric8.kubernetes.api.model.ObjectMeta;
 import io.fabric8.kubernetes.api.model.Pod;
 import io.fabric8.kubernetes.api.model.PodSpec;
+import io.fabric8.kubernetes.api.model.Secret;
 import io.fabric8.kubernetes.api.model.Service;
 import io.fabric8.kubernetes.api.model.ServicePort;
 import io.fabric8.kubernetes.api.model.ServicePortBuilder;
@@ -55,17 +59,27 @@ import io.fabric8.kubernetes.api.model.extensions.Ingress;
 import io.fabric8.kubernetes.api.model.extensions.IngressBackend;
 import io.fabric8.kubernetes.api.model.extensions.IngressRule;
 import io.fabric8.kubernetes.api.model.extensions.IngressSpec;
+import java.text.ParseException;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Date;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
+import java.util.Map.Entry;
+import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Predicate;
+import java.util.stream.Collectors;
+import org.eclipse.che.api.core.model.workspace.WorkspaceStatus;
 import org.eclipse.che.api.core.model.workspace.runtime.MachineStatus;
 import org.eclipse.che.api.core.model.workspace.runtime.RuntimeIdentity;
+import org.eclipse.che.api.core.model.workspace.runtime.ServerStatus;
 import org.eclipse.che.api.core.notification.EventService;
 import org.eclipse.che.api.installer.server.model.impl.InstallerImpl;
 import org.eclipse.che.api.workspace.server.DtoConverter;
@@ -78,27 +92,40 @@ import org.eclipse.che.api.workspace.server.hc.probe.WorkspaceProbesFactory;
 import org.eclipse.che.api.workspace.server.model.impl.RuntimeIdentityImpl;
 import org.eclipse.che.api.workspace.server.spi.InfrastructureException;
 import org.eclipse.che.api.workspace.server.spi.InternalInfrastructureException;
+import org.eclipse.che.api.workspace.server.spi.RuntimeStartInterruptedException;
+import org.eclipse.che.api.workspace.server.spi.StateException;
 import org.eclipse.che.api.workspace.server.spi.environment.InternalMachineConfig;
 import org.eclipse.che.api.workspace.shared.dto.event.MachineLogEvent;
 import org.eclipse.che.api.workspace.shared.dto.event.MachineStatusEvent;
 import org.eclipse.che.workspace.infrastructure.kubernetes.KubernetesInternalRuntime.MachineLogsPublisher;
+import org.eclipse.che.workspace.infrastructure.kubernetes.KubernetesInternalRuntime.UnrecoverablePodEventHandler;
 import org.eclipse.che.workspace.infrastructure.kubernetes.bootstrapper.KubernetesBootstrapper;
 import org.eclipse.che.workspace.infrastructure.kubernetes.bootstrapper.KubernetesBootstrapperFactory;
+import org.eclipse.che.workspace.infrastructure.kubernetes.cache.KubernetesMachineCache;
+import org.eclipse.che.workspace.infrastructure.kubernetes.cache.KubernetesRuntimeStateCache;
 import org.eclipse.che.workspace.infrastructure.kubernetes.environment.KubernetesEnvironment;
+import org.eclipse.che.workspace.infrastructure.kubernetes.model.KubernetesMachineImpl;
+import org.eclipse.che.workspace.infrastructure.kubernetes.model.KubernetesMachineImpl.MachineId;
+import org.eclipse.che.workspace.infrastructure.kubernetes.model.KubernetesRuntimeState;
+import org.eclipse.che.workspace.infrastructure.kubernetes.model.KubernetesRuntimeState.RuntimeId;
+import org.eclipse.che.workspace.infrastructure.kubernetes.model.KubernetesServerImpl;
 import org.eclipse.che.workspace.infrastructure.kubernetes.namespace.KubernetesIngresses;
 import org.eclipse.che.workspace.infrastructure.kubernetes.namespace.KubernetesNamespace;
 import org.eclipse.che.workspace.infrastructure.kubernetes.namespace.KubernetesPods;
+import org.eclipse.che.workspace.infrastructure.kubernetes.namespace.KubernetesSecrets;
 import org.eclipse.che.workspace.infrastructure.kubernetes.namespace.KubernetesServices;
-import org.eclipse.che.workspace.infrastructure.kubernetes.namespace.event.ContainerEvent;
+import org.eclipse.che.workspace.infrastructure.kubernetes.namespace.event.PodEvent;
 import org.eclipse.che.workspace.infrastructure.kubernetes.namespace.pvc.WorkspaceVolumesStrategy;
 import org.eclipse.che.workspace.infrastructure.kubernetes.server.KubernetesServerResolver;
 import org.eclipse.che.workspace.infrastructure.kubernetes.util.KubernetesSharedPool;
+import org.eclipse.che.workspace.infrastructure.kubernetes.util.PodEvents;
 import org.eclipse.che.workspace.infrastructure.kubernetes.util.RuntimeEventsPublisher;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Captor;
 import org.mockito.Mock;
 import org.mockito.MockitoAnnotations;
 import org.testng.annotations.BeforeMethod;
+import org.testng.annotations.DataProvider;
 import org.testng.annotations.Test;
 
 /**
@@ -107,29 +134,36 @@ import org.testng.annotations.Test;
  * @author Anton Korneta
  */
 public class KubernetesInternalRuntimeTest {
-
   private static final int EXPOSED_PORT_1 = 4401;
   private static final int EXPOSED_PORT_2 = 8081;
   private static final int INTERNAL_PORT = 4411;
 
   private static final String WORKSPACE_ID = "workspace123";
-  private static final String POD_NAME = "app";
+  private static final String WORKSPACE_POD_NAME = "app";
   private static final String INGRESS_NAME = "test-ingress";
   private static final String SERVICE_NAME = "test-service";
   private static final String POD_SELECTOR = "che.pod.name";
   private static final String CONTAINER_NAME_1 = "test1";
   private static final String CONTAINER_NAME_2 = "test2";
+  private static final String EVENT_CREATION_TIMESTAMP = "2018-05-15T16:17:54Z";
+  private static final String EVENT_LAST_TIMESTAMP_IN_PAST = "2018-05-15T16:18:54Z";
 
   private static final String INGRESS_HOST = "localhost";
 
-  private static final String M1_NAME = POD_NAME + '/' + CONTAINER_NAME_1;
-  private static final String M2_NAME = POD_NAME + '/' + CONTAINER_NAME_2;
+  private static final String M1_NAME = WORKSPACE_POD_NAME + '/' + CONTAINER_NAME_1;
+  private static final String M2_NAME = WORKSPACE_POD_NAME + '/' + CONTAINER_NAME_2;
+
+  private static final String[] EMPTY_UNRECOVERABLE_EVENTS = new String[0];
+  private static final String[] UNRECOVERABLE_EVENTS =
+      new String[] {"Failed Mount", "Failed Scheduling", "Failed to pull image"};
 
   private static final RuntimeIdentity IDENTITY =
-      new RuntimeIdentityImpl(WORKSPACE_ID, "env1", "usr1", "id1");
+      new RuntimeIdentityImpl(WORKSPACE_ID, "env1", "id1");
 
-  @Mock private KubernetesRuntimeContext<KubernetesEnvironment> context;
   @Mock private EventService eventService;
+  @Mock private StartSynchronizerFactory startSynchronizerFactory;
+  private StartSynchronizer startSynchronizer;
+  @Mock private KubernetesRuntimeContext<KubernetesEnvironment> context;
   @Mock private ServersCheckerFactory serverCheckerFactory;
   @Mock private ServersChecker serversChecker;
   @Mock private KubernetesBootstrapperFactory bootstrapperFactory;
@@ -138,25 +172,39 @@ public class KubernetesInternalRuntimeTest {
   @Mock private KubernetesServices services;
   @Mock private KubernetesIngresses ingresses;
   @Mock private KubernetesPods pods;
+  @Mock private KubernetesSecrets secrets;
   @Mock private KubernetesBootstrapper bootstrapper;
   @Mock private WorkspaceVolumesStrategy volumesStrategy;
   @Mock private WorkspaceProbesFactory workspaceProbesFactory;
   @Mock private ProbeScheduler probesScheduler;
   @Mock private WorkspaceProbes workspaceProbes;
   @Mock private KubernetesServerResolver kubernetesServerResolver;
+  private KubernetesRuntimeStateCache runtimeStatesCache;
+  private KubernetesMachineCache machinesCache;
 
   @Captor private ArgumentCaptor<MachineStatusEvent> machineStatusEventCaptor;
 
   private KubernetesInternalRuntime<KubernetesRuntimeContext<KubernetesEnvironment>>
       internalRuntime;
 
+  private KubernetesInternalRuntime<KubernetesRuntimeContext<KubernetesEnvironment>>
+      internalRuntimeWithoutUnrecoverableHandler;
+
   @BeforeMethod
   public void setup() throws Exception {
     MockitoAnnotations.initMocks(this);
+
+    runtimeStatesCache = new MapBasedRuntimeStateCache();
+    machinesCache = new MapBasedMachinesCache();
+
+    startSynchronizer = spy(new StartSynchronizer(eventService, IDENTITY));
+    when(startSynchronizerFactory.create(any())).thenReturn(startSynchronizer);
+
     internalRuntime =
         new KubernetesInternalRuntime<>(
             13,
             5,
+            UNRECOVERABLE_EVENTS,
             new URLRewriter.NoOpURLRewriter(),
             bootstrapperFactory,
             serverCheckerFactory,
@@ -165,6 +213,29 @@ public class KubernetesInternalRuntimeTest {
             workspaceProbesFactory,
             new RuntimeEventsPublisher(eventService),
             new KubernetesSharedPool(),
+            runtimeStatesCache,
+            machinesCache,
+            startSynchronizerFactory,
+            context,
+            namespace,
+            emptyList());
+
+    internalRuntimeWithoutUnrecoverableHandler =
+        new KubernetesInternalRuntime<>(
+            13,
+            5,
+            EMPTY_UNRECOVERABLE_EVENTS,
+            new URLRewriter.NoOpURLRewriter(),
+            bootstrapperFactory,
+            serverCheckerFactory,
+            volumesStrategy,
+            probesScheduler,
+            workspaceProbesFactory,
+            new RuntimeEventsPublisher(eventService),
+            new KubernetesSharedPool(),
+            runtimeStatesCache,
+            machinesCache,
+            startSynchronizerFactory,
             context,
             namespace,
             emptyList());
@@ -176,7 +247,9 @@ public class KubernetesInternalRuntimeTest {
     when(namespace.services()).thenReturn(services);
     when(namespace.ingresses()).thenReturn(ingresses);
     when(namespace.pods()).thenReturn(pods);
-    when(bootstrapperFactory.create(any(), anyList(), any())).thenReturn(bootstrapper);
+    when(namespace.secrets()).thenReturn(secrets);
+    when(bootstrapperFactory.create(any(), anyList(), any(), any(), any()))
+        .thenReturn(bootstrapper);
     doReturn(
             ImmutableMap.of(
                 M1_NAME,
@@ -190,7 +263,7 @@ public class KubernetesInternalRuntimeTest {
     final Map<String, Ingress> allIngresses = ImmutableMap.of(INGRESS_NAME, ingress);
     final Container container = mockContainer(CONTAINER_NAME_1, EXPOSED_PORT_1, INTERNAL_PORT);
     final ImmutableMap<String, Pod> allPods =
-        ImmutableMap.of(POD_NAME, mockPod(ImmutableList.of(container)));
+        ImmutableMap.of(WORKSPACE_POD_NAME, mockPod(ImmutableList.of(container)));
     when(services.create(any())).thenAnswer(a -> a.getArguments()[0]);
     when(ingresses.create(any())).thenAnswer(a -> a.getArguments()[0]);
     when(ingresses.wait(any(), anyInt(), any())).thenReturn(ingress);
@@ -198,7 +271,7 @@ public class KubernetesInternalRuntimeTest {
     when(k8sEnv.getServices()).thenReturn(allServices);
     when(k8sEnv.getIngresses()).thenReturn(allIngresses);
     when(k8sEnv.getPods()).thenReturn(allPods);
-    when(pods.waitAsync(any(), any())).thenReturn(CompletableFuture.completedFuture(null));
+    when(pods.waitRunningAsync(any())).thenReturn(CompletableFuture.completedFuture(null));
     when(bootstrapper.bootstrapAsync()).thenReturn(CompletableFuture.completedFuture(null));
     when(serversChecker.startAsync(any())).thenReturn(CompletableFuture.completedFuture(null));
   }
@@ -207,18 +280,20 @@ public class KubernetesInternalRuntimeTest {
   public void startsKubernetesEnvironment() throws Exception {
     final ImmutableMap<String, Pod> podsMap =
         ImmutableMap.of(
-            POD_NAME,
+            WORKSPACE_POD_NAME,
             mockPod(
                 ImmutableList.of(
                     mockContainer(CONTAINER_NAME_1, EXPOSED_PORT_1),
                     mockContainer(CONTAINER_NAME_2, EXPOSED_PORT_2, INTERNAL_PORT))));
     when(k8sEnv.getPods()).thenReturn(podsMap);
+    when(k8sEnv.getSecrets()).thenReturn(ImmutableMap.of("secret", new Secret()));
 
     internalRuntime.internalStart(emptyMap());
 
     verify(pods).create(any());
     verify(ingresses).create(any());
     verify(services).create(any());
+    verify(namespace.pods(), times(2)).watchEvents(any());
     verify(bootstrapper, times(2)).bootstrapAsync();
     verify(eventService, times(4)).publish(any());
     verifyOrderedEventsChains(
@@ -227,6 +302,35 @@ public class KubernetesInternalRuntimeTest {
     verify(serverCheckerFactory).create(IDENTITY, M1_NAME, emptyMap());
     verify(serverCheckerFactory).create(IDENTITY, M2_NAME, emptyMap());
     verify(serversChecker, times(2)).startAsync(any());
+    verify(namespace.pods(), times(1)).stopWatch();
+  }
+
+  @Test
+  public void startsKubernetesEnvironmentWithoutUnrecoverableHandler() throws Exception {
+    final ImmutableMap<String, Pod> podsMap =
+        ImmutableMap.of(
+            WORKSPACE_POD_NAME,
+            mockPod(
+                ImmutableList.of(
+                    mockContainer(CONTAINER_NAME_1, EXPOSED_PORT_1),
+                    mockContainer(CONTAINER_NAME_2, EXPOSED_PORT_2, INTERNAL_PORT))));
+    when(k8sEnv.getPods()).thenReturn(podsMap);
+
+    internalRuntimeWithoutUnrecoverableHandler.internalStart(emptyMap());
+
+    verify(pods).create(any());
+    verify(ingresses).create(any());
+    verify(services).create(any());
+    verify(namespace.pods(), times(1)).watchEvents(any());
+    verify(bootstrapper, times(2)).bootstrapAsync();
+    verify(eventService, times(4)).publish(any());
+    verifyOrderedEventsChains(
+        new MachineStatusEvent[] {newEvent(M1_NAME, STARTING), newEvent(M1_NAME, RUNNING)},
+        new MachineStatusEvent[] {newEvent(M2_NAME, STARTING), newEvent(M2_NAME, RUNNING)});
+    verify(serverCheckerFactory).create(IDENTITY, M1_NAME, emptyMap());
+    verify(serverCheckerFactory).create(IDENTITY, M2_NAME, emptyMap());
+    verify(serversChecker, times(2)).startAsync(any());
+    verify(namespace.pods(), times(1)).stopWatch();
   }
 
   @Test(expectedExceptions = InternalInfrastructureException.class)
@@ -240,8 +344,9 @@ public class KubernetesInternalRuntimeTest {
       verify(namespace).cleanUp();
       verify(namespace, never()).services();
       verify(namespace, never()).ingresses();
-      verify(namespace, never()).pods();
       throw rethrow;
+    } finally {
+      verify(namespace.pods(), times(2)).stopWatch();
     }
   }
 
@@ -250,7 +355,7 @@ public class KubernetesInternalRuntimeTest {
     final Container container1 = mockContainer(CONTAINER_NAME_1, EXPOSED_PORT_1);
     final Container container2 = mockContainer(CONTAINER_NAME_2, EXPOSED_PORT_2, INTERNAL_PORT);
     final ImmutableMap<String, Pod> allPods =
-        ImmutableMap.of(POD_NAME, mockPod(ImmutableList.of(container1, container2)));
+        ImmutableMap.of(WORKSPACE_POD_NAME, mockPod(ImmutableList.of(container1, container2)));
     when(k8sEnv.getPods()).thenReturn(allPods);
     doThrow(InfrastructureException.class).when(bootstrapper).bootstrapAsync();
 
@@ -281,20 +386,23 @@ public class KubernetesInternalRuntimeTest {
       verify(namespace).cleanUp();
       verify(namespace).services();
       verify(namespace, never()).ingresses();
-      verify(namespace, never()).pods();
       throw rethrow;
+    } finally {
+      verify(namespace.pods(), times(2)).stopWatch();
     }
   }
 
   @Test(
-    expectedExceptions = InfrastructureException.class,
-    expectedExceptionsMessageRegExp = "Kubernetes environment start was interrupted"
+    expectedExceptions = RuntimeStartInterruptedException.class,
+    expectedExceptionsMessageRegExp =
+        "Runtime start for identity 'workspace: workspace123, "
+            + "environment: env1, ownerId: id1' is interrupted"
   )
   public void throwsInfrastructureExceptionWhenMachinesWaitingIsInterrupted() throws Exception {
     final Thread thread = Thread.currentThread();
     final ImmutableMap<String, Pod> podsMap =
         ImmutableMap.of(
-            POD_NAME,
+            WORKSPACE_POD_NAME,
             mockPod(
                 ImmutableList.of(
                     mockContainer(CONTAINER_NAME_1, EXPOSED_PORT_1),
@@ -327,8 +435,20 @@ public class KubernetesInternalRuntimeTest {
   @Test
   public void testRepublishContainerOutputAsMachineLogEvents() throws Exception {
     final MachineLogsPublisher logsPublisher = internalRuntime.new MachineLogsPublisher();
-    final ContainerEvent out1 = mockContainerEvent("pulling image", "07/07/2007 19:01:22");
-    final ContainerEvent out2 = mockContainerEvent("image pulled", "07/07/2007 19:08:53");
+    final PodEvent out1 =
+        mockContainerEvent(
+            WORKSPACE_POD_NAME,
+            "Pulling",
+            "pulling image",
+            EVENT_CREATION_TIMESTAMP,
+            getCurrentTimestampWithOneHourShiftAhead());
+    final PodEvent out2 =
+        mockContainerEvent(
+            WORKSPACE_POD_NAME,
+            "Pulled",
+            "image pulled",
+            EVENT_CREATION_TIMESTAMP,
+            getCurrentTimestampWithOneHourShiftAhead());
     final ArgumentCaptor<MachineLogEvent> captor = ArgumentCaptor.forClass(MachineLogEvent.class);
 
     internalRuntime.doStartMachine(kubernetesServerResolver);
@@ -342,9 +462,85 @@ public class KubernetesInternalRuntimeTest {
   }
 
   @Test
-  public void testDoNotPublishForeignMachineOutput() {
+  public void testHandleUnrecoverableEventByReason() throws Exception {
+    final String unrecoverableEventReason = "Failed Mount";
+    final UnrecoverablePodEventHandler unrecoverableEventHandler =
+        internalRuntime.new UnrecoverablePodEventHandler(k8sEnv.getPods());
+    final PodEvent unrecoverableEvent =
+        mockContainerEvent(
+            WORKSPACE_POD_NAME,
+            unrecoverableEventReason,
+            "Failed to mount volume 'claim-che-workspace'",
+            EVENT_CREATION_TIMESTAMP,
+            getCurrentTimestampWithOneHourShiftAhead());
+    unrecoverableEventHandler.handle(unrecoverableEvent);
+
+    verify(startSynchronizer).completeExceptionally(any(InfrastructureException.class));
+  }
+
+  @Test
+  public void testHandleUnrecoverableEventByMessage() throws Exception {
+    final String unrecoverableEventMessage =
+        "Failed to pull image eclipse/che-server:nightly-centos";
+    final UnrecoverablePodEventHandler unrecoverableEventHandler =
+        internalRuntime.new UnrecoverablePodEventHandler(k8sEnv.getPods());
+    final PodEvent unrecoverableEvent =
+        mockContainerEvent(
+            WORKSPACE_POD_NAME,
+            "Pulling",
+            unrecoverableEventMessage,
+            EVENT_CREATION_TIMESTAMP,
+            getCurrentTimestampWithOneHourShiftAhead());
+    unrecoverableEventHandler.handle(unrecoverableEvent);
+
+    verify(startSynchronizer).completeExceptionally(any(InfrastructureException.class));
+  }
+
+  @Test
+  public void testDoNotHandleUnrecoverableEventFromNonWorkspacePod() throws Exception {
+    final String unrecoverableEventMessage =
+        "Failed to pull image eclipse/che-server:nightly-centos";
+    final UnrecoverablePodEventHandler unrecoverableEventHandler =
+        internalRuntime.new UnrecoverablePodEventHandler(k8sEnv.getPods());
+    final PodEvent unrecoverableEvent =
+        mockContainerEvent(
+            "NonWorkspacePod",
+            "Pulling",
+            unrecoverableEventMessage,
+            EVENT_CREATION_TIMESTAMP,
+            getCurrentTimestampWithOneHourShiftAhead());
+    unrecoverableEventHandler.handle(unrecoverableEvent);
+    // 'internalStop' is NOT expected to be called since event does not belong to the workspace
+    // pod.Cleanup will not be triggered
+    verify(namespace, never()).cleanUp();
+  }
+
+  @Test
+  public void testHandleRegularEvent() throws Exception {
+    final UnrecoverablePodEventHandler unrecoverableEventHandler =
+        internalRuntime.new UnrecoverablePodEventHandler(k8sEnv.getPods());
+    final PodEvent regularEvent =
+        mockContainerEvent(
+            WORKSPACE_POD_NAME,
+            "Pulling",
+            "pulling image",
+            EVENT_CREATION_TIMESTAMP,
+            getCurrentTimestampWithOneHourShiftAhead());
+    unrecoverableEventHandler.handle(regularEvent);
+    // 'internalStop' is NOT expected to be called and namespace cleanup will not be triggered
+    verify(namespace, never()).cleanUp();
+  }
+
+  @Test
+  public void testDoNotPublishForeignMachineOutput() throws ParseException {
     final MachineLogsPublisher logsPublisher = internalRuntime.new MachineLogsPublisher();
-    final ContainerEvent out1 = mockContainerEvent("folder created", "33/03/2033 19:01:06");
+    final PodEvent out1 =
+        mockContainerEvent(
+            WORKSPACE_POD_NAME,
+            "Created",
+            "folder created",
+            EVENT_CREATION_TIMESTAMP,
+            getCurrentTimestampWithOneHourShiftAhead());
 
     logsPublisher.handle(out1);
 
@@ -383,6 +579,137 @@ public class KubernetesInternalRuntimeTest {
     internalRuntime.internalStart(emptyMap());
 
     verify(probesScheduler).schedule(eq(workspaceProbes), any());
+  }
+
+  @Test
+  public void shouldMarkRuntimeStarting() throws Exception {
+    // when
+    internalRuntime.markStarting();
+
+    assertEquals(internalRuntime.getStatus(), WorkspaceStatus.STARTING);
+  }
+
+  @Test(
+    expectedExceptions = StateException.class,
+    expectedExceptionsMessageRegExp = "Runtime is already started"
+  )
+  public void shouldThrowExceptionIfRuntimeIsAlreadyStarting() throws Exception {
+    // given
+    runtimeStatesCache.putIfAbsent(
+        new KubernetesRuntimeState(
+            internalRuntime.getContext().getIdentity(), "test", WorkspaceStatus.STARTING));
+
+    // when
+    internalRuntime.markStarting();
+  }
+
+  @Test
+  public void shouldMarkRuntimeRunning() throws Exception {
+    // given
+    runtimeStatesCache.putIfAbsent(
+        new KubernetesRuntimeState(
+            internalRuntime.getContext().getIdentity(), "test", WorkspaceStatus.STARTING));
+
+    // when
+    internalRuntime.markRunning();
+
+    // then
+    assertEquals(internalRuntime.getStatus(), WorkspaceStatus.RUNNING);
+  }
+
+  @Test
+  public void shouldMarkRuntimeStopping() throws Exception {
+    // given
+    runtimeStatesCache.putIfAbsent(
+        new KubernetesRuntimeState(
+            internalRuntime.getContext().getIdentity(), "test", WorkspaceStatus.RUNNING));
+
+    // when
+    internalRuntime.markStopping();
+
+    // then
+    assertEquals(internalRuntime.getStatus(), WorkspaceStatus.STOPPING);
+  }
+
+  @Test(
+    expectedExceptions = StateException.class,
+    expectedExceptionsMessageRegExp = "The environment must be running or starting",
+    dataProvider = "nonRunningStatuses"
+  )
+  public void shouldThrowExceptionWhenTryToMakeNonRunningNorStartingRuntimeAsStopping(
+      WorkspaceStatus status) throws Exception {
+    // given
+    runtimeStatesCache.putIfAbsent(
+        new KubernetesRuntimeState(internalRuntime.getContext().getIdentity(), "test", status));
+
+    // when
+    internalRuntime.markStopping();
+  }
+
+  @DataProvider
+  Object[][] nonRunningStatuses() {
+    return new Object[][] {{WorkspaceStatus.STOPPING}, {WorkspaceStatus.STOPPED}};
+  }
+
+  @Test
+  public void shouldRemoveRuntimeStateOnMarkingRuntimeStopped() throws Exception {
+    // given
+    runtimeStatesCache.putIfAbsent(
+        new KubernetesRuntimeState(
+            internalRuntime.getContext().getIdentity(), "test", WorkspaceStatus.STOPPING));
+
+    // when
+    internalRuntime.markStopped();
+
+    // then
+    assertFalse(runtimeStatesCache.get(internalRuntime.getContext().getIdentity()).isPresent());
+  }
+
+  @Test
+  public void shouldScheduleServerCheckersForRunningRuntime() throws Exception {
+    // given
+    runtimeStatesCache.putIfAbsent(
+        new KubernetesRuntimeState(
+            internalRuntime.getContext().getIdentity(), "test", WorkspaceStatus.RUNNING));
+
+    // when
+    internalRuntime.scheduleServersCheckers();
+
+    // then
+    verify(probesScheduler).schedule(any(), any());
+  }
+
+  @Test
+  public void shouldScheduleServerCheckersForStartingRuntime() throws Exception {
+    // given
+    runtimeStatesCache.putIfAbsent(
+        new KubernetesRuntimeState(
+            internalRuntime.getContext().getIdentity(), "test", WorkspaceStatus.STARTING));
+
+    // when
+    internalRuntime.scheduleServersCheckers();
+
+    // then
+    verify(probesScheduler).schedule(any(), any(), any());
+  }
+
+  @Test(dataProvider = "nonStartingRunningStatuses")
+  public void shouldNotScheduleServerCheckersIfRuntimeIsNotStartingOrRunning(WorkspaceStatus status)
+      throws Exception {
+    // given
+    runtimeStatesCache.putIfAbsent(
+        new KubernetesRuntimeState(internalRuntime.getContext().getIdentity(), "test", status));
+
+    // when
+    internalRuntime.scheduleServersCheckers();
+
+    // then
+    verifyZeroInteractions(probesScheduler);
+  }
+
+  @DataProvider(name = "nonStartingRunningStatuses")
+  public Object[][] nonStartingRunningStatuses() {
+    return new Object[][] {{WorkspaceStatus.STOPPED}, {WorkspaceStatus.STOPPING}};
   }
 
   private static MachineStatusEvent newEvent(String machineName, MachineStatus status) {
@@ -442,11 +769,13 @@ public class KubernetesInternalRuntimeTest {
   private static Pod mockPod(List<Container> containers) {
     final Pod pod = mock(Pod.class);
     final PodSpec spec = mock(PodSpec.class);
-    mockName(POD_NAME, pod);
+    mockName(WORKSPACE_POD_NAME, pod);
     when(spec.getContainers()).thenReturn(containers);
     when(pod.getSpec()).thenReturn(spec);
     when(pod.getMetadata().getLabels())
-        .thenReturn(ImmutableMap.of(POD_SELECTOR, POD_NAME, CHE_ORIGINAL_NAME_LABEL, POD_NAME));
+        .thenReturn(
+            ImmutableMap.of(
+                POD_SELECTOR, WORKSPACE_POD_NAME, CHE_ORIGINAL_NAME_LABEL, WORKSPACE_POD_NAME));
     return pod;
   }
 
@@ -455,7 +784,7 @@ public class KubernetesInternalRuntimeTest {
     final ServiceSpec spec = mock(ServiceSpec.class);
     mockName(SERVICE_NAME, service);
     when(service.getSpec()).thenReturn(spec);
-    when(spec.getSelector()).thenReturn(ImmutableMap.of(POD_SELECTOR, POD_NAME));
+    when(spec.getSelector()).thenReturn(ImmutableMap.of(POD_SELECTOR, WORKSPACE_POD_NAME));
     final ServicePort sp1 =
         new ServicePortBuilder().withTargetPort(intOrString(EXPOSED_PORT_1)).build();
     final ServicePort sp2 =
@@ -503,24 +832,149 @@ public class KubernetesInternalRuntimeTest {
     return metadata;
   }
 
-  private static ContainerEvent mockContainerEvent(String message, String time) {
-    final ContainerEvent event = mock(ContainerEvent.class);
-    when(event.getPodName()).thenReturn(POD_NAME);
+  private static PodEvent mockContainerEvent(
+      String podName,
+      String reason,
+      String message,
+      String creationTimestamp,
+      String lastTimestamp) {
+    final PodEvent event = mock(PodEvent.class);
+    when(event.getPodName()).thenReturn(podName);
     when(event.getContainerName()).thenReturn(CONTAINER_NAME_1);
+    when(event.getReason()).thenReturn(reason);
     when(event.getMessage()).thenReturn(message);
-    when(event.getTime()).thenReturn(time);
+    when(event.getCreationTimeStamp()).thenReturn(creationTimestamp);
+    when(event.getLastTimestamp()).thenReturn(lastTimestamp);
     return event;
   }
 
-  private static MachineLogEvent asMachineLogEvent(ContainerEvent event) {
+  private static MachineLogEvent asMachineLogEvent(PodEvent event) {
     return newDto(MachineLogEvent.class)
         .withRuntimeId(DtoConverter.asDto(IDENTITY))
         .withText(event.getMessage())
-        .withTime(event.getTime())
+        .withTime(event.getCreationTimeStamp())
         .withMachineName(event.getPodName() + '/' + event.getContainerName());
+  }
+
+  private String getCurrentTimestampWithOneHourShiftAhead() throws ParseException {
+    Date currentTimestampWithOneHourShiftAhead = new Date(new Date().getTime() + 3600 * 1000);
+    return PodEvents.convertDateToEventTimestamp(currentTimestampWithOneHourShiftAhead);
   }
 
   private static IntOrString intOrString(int port) {
     return new IntOrStringBuilder().withIntVal(port).withStrVal(String.valueOf(port)).build();
+  }
+
+  private static class MapBasedRuntimeStateCache implements KubernetesRuntimeStateCache {
+    private Map<RuntimeId, KubernetesRuntimeState> runtimesStates = new HashMap<>();
+
+    @Override
+    public Set<RuntimeIdentity> getIdentities() throws InfrastructureException {
+      return new HashSet<>(runtimesStates.keySet());
+    }
+
+    @Override
+    public boolean putIfAbsent(KubernetesRuntimeState state) throws InfrastructureException {
+      return runtimesStates.putIfAbsent(state.getRuntimeId(), state) == null;
+    }
+
+    @Override
+    public void updateStatus(RuntimeIdentity runtimeId, WorkspaceStatus newStatus)
+        throws InfrastructureException {
+      runtimesStates.get(new RuntimeId(runtimeId)).setStatus(newStatus);
+    }
+
+    @Override
+    public boolean updateStatus(
+        RuntimeIdentity identity, Predicate<WorkspaceStatus> predicate, WorkspaceStatus newStatus)
+        throws InfrastructureException {
+      KubernetesRuntimeState state = runtimesStates.get(new RuntimeId(identity));
+      if (predicate.test(state.getStatus())) {
+        state.setStatus(newStatus);
+        return true;
+      }
+      return false;
+    }
+
+    @Override
+    public WorkspaceStatus getStatus(RuntimeIdentity runtimeId) throws InfrastructureException {
+      return runtimesStates.get(new RuntimeId(runtimeId)).getStatus();
+    }
+
+    @Override
+    public Optional<KubernetesRuntimeState> get(RuntimeIdentity runtimeId)
+        throws InfrastructureException {
+      return Optional.ofNullable(runtimesStates.get(new RuntimeId(runtimeId)));
+    }
+
+    @Override
+    public void remove(RuntimeIdentity runtimeId) throws InfrastructureException {
+      runtimesStates.remove(new RuntimeId(runtimeId));
+    }
+  }
+
+  private static class MapBasedMachinesCache implements KubernetesMachineCache {
+    private Map<MachineId, KubernetesMachineImpl> machines = new HashMap<>();
+
+    private MachineId machineIdOf(RuntimeIdentity runtimeId, KubernetesMachineImpl machine) {
+      return new MachineId(runtimeId.getWorkspaceId(), machine.getName());
+    }
+
+    private MachineId machineIdOf(RuntimeIdentity runtimeId, String machineName) {
+      return new MachineId(runtimeId.getWorkspaceId(), machineName);
+    }
+
+    @Override
+    public void put(RuntimeIdentity runtimeIdentity, KubernetesMachineImpl machine)
+        throws InfrastructureException {
+      machines.put(machineIdOf(runtimeIdentity, machine), machine);
+    }
+
+    @Override
+    public boolean updateServerStatus(
+        RuntimeIdentity runtimeIdentity,
+        String machineName,
+        String serverName,
+        ServerStatus newStatus)
+        throws InfrastructureException {
+      KubernetesServerImpl server =
+          machines.get(machineIdOf(runtimeIdentity, machineName)).getServers().get(serverName);
+
+      if (server.getStatus().equals(newStatus)) {
+        return false;
+      } else {
+        server.setStatus(newStatus);
+        return true;
+      }
+    }
+
+    @Override
+    public KubernetesServerImpl getServer(
+        RuntimeIdentity runtimeIdentity, String machineName, String serverName)
+        throws InfrastructureException {
+      return machines.get(machineIdOf(runtimeIdentity, machineName)).getServers().get(serverName);
+    }
+
+    @Override
+    public void updateMachineStatus(
+        RuntimeIdentity runtimeIdentity, String machineName, MachineStatus newStatus)
+        throws InfrastructureException {
+      machines.get(machineIdOf(runtimeIdentity, machineName)).setStatus(newStatus);
+    }
+
+    @Override
+    public Map<String, KubernetesMachineImpl> getMachines(RuntimeIdentity runtimeIdentity)
+        throws InfrastructureException {
+      return machines
+          .entrySet()
+          .stream()
+          .filter(e -> e.getKey().getWorkspaceId().equals(runtimeIdentity.getWorkspaceId()))
+          .collect(Collectors.toMap(e -> e.getValue().getName(), Entry::getValue));
+    }
+
+    @Override
+    public void remove(RuntimeIdentity identity) throws InfrastructureException {
+      machines.keySet().removeIf(id -> id.getWorkspaceId().equals(identity.getWorkspaceId()));
+    }
   }
 }

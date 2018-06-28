@@ -58,6 +58,8 @@ import org.eclipse.che.selenium.core.action.ActionsFactory;
 import org.eclipse.che.selenium.core.constant.TestProjectExplorerContextMenuConstants.ContextMenuCommandGoals;
 import org.eclipse.che.selenium.core.constant.TestProjectExplorerContextMenuConstants.ContextMenuFirstLevelItems;
 import org.eclipse.che.selenium.core.constant.TestProjectExplorerContextMenuConstants.ContextMenuItems;
+import org.eclipse.che.selenium.core.webdriver.SeleniumWebDriverHelper;
+import org.eclipse.che.selenium.core.webdriver.WebDriverWaitFactory;
 import org.openqa.selenium.By;
 import org.openqa.selenium.JavascriptExecutor;
 import org.openqa.selenium.Keys;
@@ -170,6 +172,7 @@ public class ProjectExplorer {
     String PROJECT_EXPLORER_ITEM_TEMPLATE = "//div[@path='/%s']/div";
     String COLOURED_ITEM_TEMPLATE =
         "//div[@id='gwt-debug-projectTree']//div[@path='/%s']/descendant::div[@style='%s']";
+    String MAXIMIZE_BUTTON_XPATH = "(//div[@id='gwt-debug-maximizeButton'])[position()=1]";
   }
 
   /**
@@ -238,6 +241,10 @@ public class ProjectExplorer {
   /** wait appearance of the IDE Project Explorer */
   public void waitProjectExplorer() {
     waitProjectExplorer(EXPECTED_MESS_IN_CONSOLE_SEC);
+  }
+
+  public void waitProjectExplorerDisappearance(int timeout) {
+    seleniumWebDriverHelper.waitInvisibility(By.id(PROJECT_EXPLORER_TREE_ITEMS), timeout);
   }
 
   /**
@@ -1055,5 +1062,10 @@ public class ProjectExplorer {
    */
   public void waitAllItemsIsSelected(List<String> paths) {
     paths.forEach(this::waitItemIsSelected);
+  }
+
+  /** click on the 'Maximize' button */
+  public void clickOnMaximizeButton() {
+    seleniumWebDriverHelper.waitAndClick(By.xpath(Locators.MAXIMIZE_BUTTON_XPATH));
   }
 }

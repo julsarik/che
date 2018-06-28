@@ -46,12 +46,11 @@ import org.eclipse.che.commons.lang.NameGenerator;
 import org.eclipse.che.selenium.core.SeleniumWebDriver;
 import org.eclipse.che.selenium.core.TestGroup;
 import org.eclipse.che.selenium.core.client.TestGitHubServiceClient;
-import org.eclipse.che.selenium.core.constant.TestBrowser;
 import org.eclipse.che.selenium.core.organization.InjectTestOrganization;
 import org.eclipse.che.selenium.core.pageobject.InjectPageObject;
 import org.eclipse.che.selenium.core.pageobject.PageObjectsInjector;
-import org.eclipse.che.selenium.core.user.InjectTestUser;
-import org.eclipse.che.selenium.core.user.TestUser;
+import org.eclipse.che.selenium.core.user.DefaultTestUser;
+import org.eclipse.che.selenium.core.webdriver.SeleniumWebDriverFactory;
 import org.eclipse.che.selenium.core.webdriver.log.WebDriverLogsReaderFactory;
 import org.eclipse.che.selenium.core.workspace.InjectTestWorkspace;
 import org.eclipse.che.selenium.core.workspace.TestWorkspace;
@@ -70,7 +69,9 @@ import org.testng.ISuite;
 import org.testng.ISuiteListener;
 import org.testng.ITestContext;
 import org.testng.ITestListener;
+import org.testng.ITestNGMethod;
 import org.testng.ITestResult;
+import org.testng.SkipException;
 import org.testng.TestException;
 
 /**
@@ -87,6 +88,8 @@ public abstract class SeleniumTestHandler
 
   private static final Logger LOG = LoggerFactory.getLogger(SeleniumTestHandler.class);
   private static final AtomicBoolean isCleanUpCompleted = new AtomicBoolean();
+
+  @Inject private SeleniumWebDriverFactory seleniumWebDriverFactory;
 
   @Inject
   @Named("tests.screenshots_dir")
@@ -107,34 +110,18 @@ public abstract class SeleniumTestHandler
   @Inject private PageObjectsInjector pageObjectsInjector;
 
   @Inject
-  @Named("sys.browser")
-  private TestBrowser browser;
-
-  @Inject
-  @Named("sys.driver.port")
-  private String webDriverPort;
-
-  @Inject
-  @Named("sys.grid.mode")
-  private boolean gridMode;
-
-  @Inject
-  @Named("sys.driver.version")
-  private String webDriverVersion;
-
-  @Inject(optional = true)
   @Named("github.username")
   private String gitHubUsername;
 
-  @Inject(optional = true)
+  @Inject
   @Named("github.password")
   private String gitHubPassword;
 
-  @Inject(optional = true)
+  @Inject
   @Named("sys.excludedGroups")
   private String excludedGroups;
 
-  @Inject private TestUser defaultTestUser;
+  @Inject private DefaultTestUser defaultTestUser;
   @Inject private TestWorkspaceProvider testWorkspaceProvider;
   @Inject private TestGitHubServiceClient gitHubClientService;
   @Inject private TestWorkspaceLogsReader testWorkspaceLogsReader;
@@ -142,7 +129,12 @@ public abstract class SeleniumTestHandler
   @Inject private WebDriverLogsReaderFactory webDriverLogsReaderFactory;
 
   private final Injector injector;
+
+  // this is the map {thread ID} -> {test instance}
   private final Map<Long, Object> runningTests = new ConcurrentHashMap<>();
+
+  // this is the map {test class FQN} -> {failed test method}
+  private final Map<String, ITestNGMethod> testsWithFailure = new ConcurrentHashMap<>();
 
   public SeleniumTestHandler() {
     injector = createInjector(getParentModules());
@@ -156,7 +148,7 @@ public abstract class SeleniumTestHandler
 
   private void revokeGithubOauthToken() {
     // do not revoke if github tests are not being executed
-    if (excludedGroups == null || excludedGroups.contains(TestGroup.GITHUB)) {
+    if (excludedGroups != null && excludedGroups.contains(TestGroup.GITHUB)) {
       return;
     }
 
@@ -169,19 +161,13 @@ public abstract class SeleniumTestHandler
 
   @Override
   public void onTestStart(ITestResult result) {
-    // count several invocations of method (e.g. in case of data provider is used)
-    String invocationLabel = "";
-    if (result.getMethod().getCurrentInvocationCount() > 0) {
-      invocationLabel = format(" (run %d)", result.getMethod().getCurrentInvocationCount() + 1);
-    }
-
     LOG.info(
-        "Starting test #{} {}.{}{}. {}",
+        "Starting test #{} {}. {}",
         seleniumTestStatistics.hitStart(),
-        result.getTestClass().getRealClass().getSimpleName(),
-        result.getMethod().getMethodName(),
-        invocationLabel,
+        getStartingTestLabel(result.getMethod()),
         seleniumTestStatistics.toString());
+
+    skipTestIfNeeded(result);
   }
 
   @Override
@@ -225,7 +211,7 @@ public abstract class SeleniumTestHandler
   private void checkWebDriverSessionCreation() {
     SeleniumWebDriver seleniumWebDriver = null;
     try {
-      seleniumWebDriver = new SeleniumWebDriver(browser, webDriverPort, gridMode, webDriverVersion);
+      seleniumWebDriver = seleniumWebDriverFactory.create();
     } finally {
       Optional.ofNullable(seleniumWebDriver)
           .ifPresent(SeleniumWebDriver::quit); // finish webdriver session
@@ -237,27 +223,29 @@ public abstract class SeleniumTestHandler
 
   @Override
   public void beforeInvocation(IInvokedMethod method, ITestResult testResult) {
-    Object testInstance = method.getTestMethod().getInstance();
-    if (runningTests.containsValue(testInstance)) {
+    Object invokingTestInstance = method.getTestMethod().getInstance();
+    if (runningTests.containsValue(invokingTestInstance)) {
       return;
     }
 
     long currentThreadId = Thread.currentThread().getId();
-    if (isNewTestInProgress(testInstance)) {
-      preDestroy(runningTests.remove(currentThreadId));
+    if (isNewTestInProgress(invokingTestInstance)) {
+      Object previousTestInstance = runningTests.remove(currentThreadId);
+      preDestroy(previousTestInstance);
+      testsWithFailure.remove(previousTestInstance.getClass().getName());
     }
 
-    String testName = testInstance.getClass().getName();
+    String testName = invokingTestInstance.getClass().getName();
 
     try {
       LOG.info("Dependencies injection in {}", testName);
-      injectDependencies(testResult.getTestContext(), testInstance);
+      injectDependencies(testResult.getTestContext(), invokingTestInstance);
     } catch (Exception e) {
       String errorMessage = "Failed to inject fields in " + testName;
       LOG.error(errorMessage, e);
       throw new TestException(errorMessage, e);
     } finally {
-      runningTests.put(currentThreadId, testInstance);
+      runningTests.put(currentThreadId, invokingTestInstance);
     }
   }
 
@@ -295,25 +283,32 @@ public abstract class SeleniumTestHandler
   /** Is invoked when test or configuration is finished. */
   private void onTestFinish(ITestResult result) {
     if (result.getStatus() == ITestResult.FAILURE || result.getStatus() == ITestResult.SKIP) {
-      String invocationLabel = "";
-      if (result.getMethod().getCurrentInvocationCount() > 1) {
-        invocationLabel = format(" (run %d)", result.getMethod().getCurrentInvocationCount());
-      }
+      switch (result.getStatus()) {
+        case ITestResult.FAILURE:
+          String errorDetails =
+              result.getThrowable() != null
+                  ? " Error: " + result.getThrowable().getLocalizedMessage()
+                  : "";
 
-      if (result.getThrowable() != null) {
-        LOG.error(
-            "Test {}.{}{} failed. Error: {}",
-            result.getTestClass().getRealClass().getSimpleName(),
-            result.getMethod().getMethodName(),
-            invocationLabel,
-            result.getThrowable().getLocalizedMessage());
-        LOG.debug(result.getThrowable().getLocalizedMessage(), result.getThrowable());
-      } else {
-        LOG.error(
-            "Test {}.{}{} failed without exception.",
-            result.getTestClass().getRealClass().getSimpleName(),
-            result.getMethod().getMethodName(),
-            invocationLabel);
+          LOG.error("Test {} failed.{}", getCompletedTestLabel(result.getMethod()), errorDetails);
+          LOG.debug(result.getThrowable().getLocalizedMessage(), result.getThrowable());
+
+          testsWithFailure.put(result.getTestClass().getRealClass().getName(), result.getMethod());
+
+          break;
+
+        case ITestResult.SKIP:
+          LOG.warn("Test {} skipped.", getCompletedTestLabel(result.getMethod()));
+
+          // don't capture test data if test is skipped because of previous test with higher
+          // priority failed
+          if (testsWithFailure.containsKey(result.getMethod().getInstance().getClass().getName())) {
+            return;
+          }
+
+          break;
+
+        default:
       }
 
       captureScreenshot(result);
@@ -391,7 +386,6 @@ public abstract class SeleniumTestHandler
   private boolean hasInjectAnnotation(AccessibleObject f) {
     return f.isAnnotationPresent(com.google.inject.Inject.class)
         || f.isAnnotationPresent(javax.inject.Inject.class)
-        || f.isAnnotationPresent(InjectTestUser.class)
         || f.isAnnotationPresent(InjectTestWorkspace.class)
         || f.isAnnotationPresent(InjectTestOrganization.class)
         || f.isAnnotationPresent(InjectPageObject.class);
@@ -523,7 +517,7 @@ public abstract class SeleniumTestHandler
   }
 
   /** Cleans up test environment. */
-  public void shutdown() {
+  private void shutdown() {
     if (isCleanUpCompleted.get()) {
       return;
     }
@@ -532,6 +526,7 @@ public abstract class SeleniumTestHandler
 
     for (Object testInstance : runningTests.values()) {
       preDestroy(testInstance);
+      testsWithFailure.remove(testInstance.getClass().getName());
     }
 
     if (testWorkspaceProvider != null) {
@@ -539,10 +534,59 @@ public abstract class SeleniumTestHandler
     }
 
     if (defaultTestUser != null) {
-      defaultTestUser.cleanUp();
+      try {
+        defaultTestUser.delete();
+      } catch (IOException e) {
+        throw new RuntimeException(e.getMessage(), e);
+      }
     }
 
     isCleanUpCompleted.set(true);
+  }
+
+  /**
+   * Skip test if preceding test with higher priority from the same test class has failed.
+   *
+   * @param result holds result of test execution
+   * @throws SkipException if test should be skipped
+   */
+  private void skipTestIfNeeded(ITestResult result) {
+    ITestNGMethod testMethodToSkip = result.getMethod();
+    ITestNGMethod failedTestMethod =
+        testsWithFailure.get(testMethodToSkip.getInstance().getClass().getName());
+
+    // Test with lower priority value is started firstly by TestNG.
+    if (failedTestMethod != null
+        && testMethodToSkip.getPriority() > failedTestMethod.getPriority()) {
+      throw new SkipException(
+          format(
+              "Skipping test %s because it depends on test %s which has failed earlier.",
+              getStartingTestLabel(testMethodToSkip), getCompletedTestLabel(failedTestMethod)));
+    }
+  }
+
+  private String getStartingTestLabel(ITestNGMethod test) {
+    String invocationLabel = "";
+    if (test.getCurrentInvocationCount() > 0) {
+      invocationLabel = format(" (run %d)", test.getCurrentInvocationCount() + 1);
+    }
+
+    return getTestLabel(test, invocationLabel);
+  }
+
+  private String getCompletedTestLabel(ITestNGMethod test) {
+    String invocationLabel = "";
+    if (test.getCurrentInvocationCount() > 1) {
+      invocationLabel = format(" (run %d)", test.getCurrentInvocationCount());
+    }
+
+    return getTestLabel(test, invocationLabel);
+  }
+
+  private String getTestLabel(ITestNGMethod test, String invocationLabel) {
+    return format(
+        "%s.%s%s",
+        test.getInstance().getClass().getSimpleName(), test.getMethodName(), invocationLabel);
   }
 
   /** Returns list of parent modules */

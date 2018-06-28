@@ -35,6 +35,7 @@ import org.eclipse.che.api.workspace.server.spi.InfrastructureException;
 import org.eclipse.che.workspace.infrastructure.kubernetes.namespace.KubernetesIngresses;
 import org.eclipse.che.workspace.infrastructure.kubernetes.namespace.KubernetesPersistentVolumeClaims;
 import org.eclipse.che.workspace.infrastructure.kubernetes.namespace.KubernetesPods;
+import org.eclipse.che.workspace.infrastructure.kubernetes.namespace.KubernetesSecrets;
 import org.eclipse.che.workspace.infrastructure.kubernetes.namespace.KubernetesServices;
 import org.eclipse.che.workspace.infrastructure.openshift.OpenShiftClientFactory;
 import org.mockito.Mock;
@@ -59,6 +60,7 @@ public class OpenShiftProjectTest {
   @Mock private OpenShiftRoutes routes;
   @Mock private KubernetesPersistentVolumeClaims pvcs;
   @Mock private KubernetesIngresses ingresses;
+  @Mock private KubernetesSecrets secrets;
   @Mock private OpenShiftClientFactory clientFactory;
   @Mock private OpenShiftClient openShiftClient;
   @Mock private KubernetesClient kubernetesClient;
@@ -81,29 +83,42 @@ public class OpenShiftProjectTest {
     when(namespaceOperation.withName(anyString())).thenReturn(serviceAccountResource);
     when(serviceAccountResource.get()).thenReturn(mock(ServiceAccount.class));
 
-    openShiftProject = new OpenShiftProject(WORKSPACE_ID, pods, services, routes, pvcs, ingresses);
+    openShiftProject =
+        new OpenShiftProject(
+            clientFactory,
+            WORKSPACE_ID,
+            PROJECT_NAME,
+            pods,
+            services,
+            routes,
+            pvcs,
+            ingresses,
+            secrets);
   }
 
   @Test
-  public void testOpenShiftProjectCreationWhenProjectExists() throws Exception {
+  public void testOpenShiftProjectPreparingWhenProjectExists() throws Exception {
     // given
     prepareProject(PROJECT_NAME);
+    OpenShiftProject openShiftProject =
+        new OpenShiftProject(clientFactory, PROJECT_NAME, WORKSPACE_ID);
 
     // when
-    new OpenShiftProject(clientFactory, PROJECT_NAME, WORKSPACE_ID);
+    openShiftProject.prepare();
   }
 
   @Test
-  public void testOpenShiftProjectCreationWhenProjectDoesNotExist() throws Exception {
+  public void testOpenShiftProjectPreparingWhenProjectDoesNotExist() throws Exception {
     // given
     MetadataNested projectMetadata = prepareProjectRequest();
 
     Resource resource = prepareProjectResource(PROJECT_NAME);
     doThrow(new KubernetesClientException("error", 403, null)).when(resource).get();
-
-    // when
     OpenShiftProject openShiftProject =
         new OpenShiftProject(clientFactory, PROJECT_NAME, WORKSPACE_ID);
+
+    // when
+    openShiftProject.prepare();
 
     // then
     verify(projectMetadata).withName(PROJECT_NAME);
@@ -117,6 +132,7 @@ public class OpenShiftProjectTest {
     verify(routes).delete();
     verify(services).delete();
     verify(pods).delete();
+    verify(secrets).delete();
   }
 
   @Test

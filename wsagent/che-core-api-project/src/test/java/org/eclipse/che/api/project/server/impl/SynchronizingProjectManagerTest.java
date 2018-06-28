@@ -22,6 +22,7 @@ import org.eclipse.che.api.core.ServerException;
 import org.eclipse.che.api.core.model.workspace.config.ProjectConfig;
 import org.eclipse.che.api.core.model.workspace.config.SourceStorage;
 import org.eclipse.che.api.project.shared.NewProjectConfig;
+import org.eclipse.che.api.project.shared.RegisteredProject;
 import org.mockito.InjectMocks;
 import org.mockito.Mock;
 import org.mockito.testng.MockitoTestNGListener;
@@ -38,7 +39,7 @@ public class SynchronizingProjectManagerTest {
   private static final String DST_WS_PATH = "/dst/ws/path";
 
   @Mock private ExecutiveProjectManager executiveProjectManager;
-  @Mock private ProjectSynchronizer projectSynchronizer;
+  @Mock private WorkspaceProjectSynchronizer projectSynchronizer;
   @InjectMocks private SynchronizingProjectManager synchronizingProjectManager;
 
   @Mock private Map<ProjectConfig, Map<String, String>> projectConfigs;
